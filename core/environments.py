@@ -133,6 +133,16 @@ class HoverEnv(BiguaGymEnv):
             for v in self._getter(state)
         ])
 
+    @staticmethod
+    def _unwrap_state(state: dict) -> dict:
+        # PATCH TEMPORÁRIO (testes-ambientes): biguasim 1.0.0 devolve
+        # {'robot': [ {sensores} ], 't': t}; o restante do código espera o dict plano de sensores.
+        # Estado já plano passa sem mudança.
+        robot = state.get('robot')
+        if isinstance(robot, list) and robot and isinstance(robot[0], dict):
+            return robot[0]
+        return state
+
     def _set_dynamics(self, state: dict) -> None:
         # RPYDynamicsSensor reports roll/pitch/yaw (indices 15:) in degrees;
         # convert here so every downstream radian comparison/trig call is correct.
@@ -141,7 +151,7 @@ class HoverEnv(BiguaGymEnv):
         self._dynamics = dynamics
 
     def _reset(self):
-        state = self._env.reset()
+        state = self._unwrap_state(self._env.reset())
         self._set_dynamics(state)
         self._episode_steps = 0
         self._last_norm = None
@@ -161,6 +171,19 @@ class HoverEnv(BiguaGymEnv):
             shape=(total_dim,),
             dtype=np.float32,
         )
+        # PATCH TEMPORÁRIO (testes-ambientes): com cmd_motor_speeds a dinâmica usa a ação direto
+        # como velocidade dos rotores, então o Box vem dos parâmetros do modelo de dinâmica
+        # (nº de rotores e limites), não do esquema Unreal do agente (ex.: BlueBoat → [vx, vy, vz]).
+        dyn = getattr(self._env, '_dynamics_dict', {}).get('robot')
+        dyn_params = getattr(dyn, 'params', None) or {}
+        if self._control_abstraction == 'cmd_motor_speeds' and dyn_params.get('rotor_pos'):
+            self.action_space = spaces.Box(
+                low=float(dyn_params['rotor_speed_min']),
+                high=float(dyn_params['rotor_speed_max']),
+                shape=(len(dyn_params['rotor_pos']),),
+                dtype=np.float32,
+            )
+            return
         self.action_space = spaces.Box(
             low=float(self._env.action_space.get_low()[0]),
             high=float(self._env.action_space.get_high()[0]),
@@ -210,7 +233,7 @@ class HoverEnv(BiguaGymEnv):
         else:
             action_arg = flat.tolist()
 
-        state = self._env.step(action_arg, action_repeat=self._action_repeat)
+        state = self._unwrap_state(self._env.step(action_arg, action_repeat=self._action_repeat))
         self._set_dynamics(state)
         obs = self._wrap_state(state)
 
@@ -273,7 +296,7 @@ class LandEnv(HoverEnv):
         return 300  # BiguaGym default
     
     def _reset(self):
-        state = self._env.reset()
+        state = self._unwrap_state(self._env.reset())
         self._set_dynamics(state)
         self._episode_steps = 0
         self._last_norm = None
@@ -352,7 +375,7 @@ class LandEnv(HoverEnv):
         else:
             action_arg = flat.tolist()
 
-        state = self._env.step(action_arg, action_repeat=self._action_repeat)
+        state = self._unwrap_state(self._env.step(action_arg, action_repeat=self._action_repeat))
         self._set_dynamics(state)
         obs = self._wrap_state(state)
 
@@ -434,7 +457,7 @@ class DockEnv(LandEnv):
         return env_params, obs_params
     
     def _reset(self):
-        state = self._env.reset()
+        state = self._unwrap_state(self._env.reset())
         self._set_dynamics(state)
         self._episode_steps = 0
         self._last_norm = None
@@ -459,7 +482,7 @@ class DockEnv(LandEnv):
         else:
             action_arg = flat.tolist()
 
-        state = self._env.step(action_arg, action_repeat=self._action_repeat)
+        state = self._unwrap_state(self._env.step(action_arg, action_repeat=self._action_repeat))
         self._set_dynamics(state)
         obs = self._wrap_state(state)
 
@@ -882,7 +905,7 @@ class TrajectoryEnv(NavEnv):
             self._env.draw_point(self.trajectory[i].tolist())
 
     def _reset(self) -> tuple:
-        state = self._env.reset()
+        state = self._unwrap_state(self._env.reset())
         self._set_dynamics(state)
         self._episode_steps = 0
         self._last_norm = None
@@ -901,7 +924,7 @@ class TrajectoryEnv(NavEnv):
             if self._batch_size > 1 else flat.tolist()
         )
 
-        state = self._env.step(action_arg, action_repeat=self._action_repeat)
+        state = self._unwrap_state(self._env.step(action_arg, action_repeat=self._action_repeat))
         self._set_dynamics(state)
         obs = self._wrap_state(state)  # updates _wp_idx via _find_nearest_wp
 
