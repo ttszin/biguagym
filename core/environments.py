@@ -314,6 +314,8 @@ class LandEnv(HoverEnv):
     0.5 m) terminate the episode with a −5 penalty.
     """
 
+    SUCCESS_BONUS = 20.0   # spec recompensas (v1); DockEnv herda
+
     def __init__(
         self,
         seed: int,
@@ -405,6 +407,9 @@ class LandEnv(HoverEnv):
         excess_horiz = max(horiz_speed - safe_horiz, 0.0)
         drift_penalty = -excess_horiz * proximity_weight * 0.5
 
+        self._last_terms = {"norm": float(norm_reward), "smooth": float(smooth_reward),
+                            "stable": float(stable_reward), "spin": float(spin_reward),
+                            "impact": float(impact_penalty), "drift": float(drift_penalty)}
         return (norm_reward + smooth_reward + stable_reward
                 + spin_reward + impact_penalty + drift_penalty)
 
@@ -438,22 +443,41 @@ class LandEnv(HoverEnv):
         descent_speed = max(float(-vel[2]), 0.0)
         hard_landing = bool(proximity_weight > 0.5 and descent_speed > 2.0)
 
-        terminated = bool(
-            (abs(r) > np.radians(15))
-            or (abs(p) > np.radians(15))
-            or out_of_bounds
-            or self._on_target
-            or hard_landing
-        )
+        tilt = bool((abs(r) > np.radians(15)) or (abs(p) > np.radians(15)))
+        failures = {"hard_landing": hard_landing, "tilt": tilt, "out_of_bounds": out_of_bounds}
+        reward, terminated, reason, shaping = self._land_like_reward(failures, "hard_landing", truncated)
 
-        reward = self._reward()
-        if self._on_target:
-            reward = 3.0 * abs(reward)
-        elif hard_landing:
-            reward = -5.0
-
-        info = {"reached_goals": int(self._on_target_buf), "hard_landing": hard_landing}
+        info = {"reached_goals": int(self._on_target_buf), "hard_landing": hard_landing,
+                "termination_reason": reason,
+                "reward_terms": {**self._last_terms, "terminal": float(reward - shaping)}}
         return obs, float(reward), terminated, truncated, info
+
+    def _land_like_reward(self, failures: dict, hard_key: str, truncated: bool) -> tuple:
+        """Recompensa e término de LandEnv/DockEnv. Devolve (reward, terminated, reason, shaping).
+
+        v0 (original): o término usa o _on_target do passo anterior; sucesso → 3·|r| (com o _on_target novo);
+        pouso/docagem dura → −5 fixo. v1: sucesso termina no próprio passo com +SUCCESS_BONUS; toda falha
+        (inclusive a dura) soma TERM_PENALTY ao shaping.
+        """
+        if self._reward_version == "v0":
+            prev_on_target = self._on_target    # o término original usa o _on_target do passo anterior
+            terminated = bool(any(failures.values()) or prev_on_target)
+            shaping = self._reward()
+            if self._on_target:
+                reward = 3.0 * abs(shaping)
+            elif failures[hard_key]:
+                reward = -5.0
+            else:
+                reward = shaping
+            success = bool(prev_on_target)
+        else:
+            shaping = self._reward()
+            success = bool(self._on_target)
+            terminated = bool(any(failures.values()) or success)
+            reward = shaping
+        reason = self._termination_reason(success, failures, truncated)
+        reward += self._terminal_reward(reason)
+        return reward, terminated, reason, shaping
 
 
 class DockEnv(LandEnv):
@@ -546,21 +570,13 @@ class DockEnv(LandEnv):
         descent_speed = max(float(-vel[2]), 0.0)
         hard_docking = bool(proximity_weight > 0.5 and descent_speed > 2.0)
 
-        terminated = bool(
-            (abs(r) > np.radians(15))
-            or (abs(p) > np.radians(15))
-            or out_of_bounds
-            or self._on_target
-            or hard_docking
-        )
+        tilt = bool((abs(r) > np.radians(15)) or (abs(p) > np.radians(15)))
+        failures = {"hard_docking": hard_docking, "tilt": tilt, "out_of_bounds": out_of_bounds}
+        reward, terminated, reason, shaping = self._land_like_reward(failures, "hard_docking", truncated)
 
-        reward = self._reward()
-        if self._on_target:
-            reward = 3.0 * abs(reward)
-        elif hard_docking:
-            reward = -5.0
-
-        info = {"reached_goals": int(self._on_target_buf), "hard_docking": hard_docking}
+        info = {"reached_goals": int(self._on_target_buf), "hard_docking": hard_docking,
+                "termination_reason": reason,
+                "reward_terms": {**self._last_terms, "terminal": float(reward - shaping)}}
         return obs, float(reward), terminated, truncated, info
     
 class NavEnv(HoverEnv):
