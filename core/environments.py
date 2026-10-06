@@ -957,7 +957,18 @@ class TrajectoryEnv(NavEnv):
         r_stable = -(rpy_ratio ** 2) * self.W_STABLE
         r_smooth = -self.W_SMOOTH * float(np.linalg.norm(ang_vel))
 
-        return r_cte + r_prog + r_align + r_stable + r_smooth
+        if self._reward_version == "v0":
+            r_track = r_cte + r_align                 # original: paga todo passo sobre o caminho, mesmo parado
+        else:
+            # v1: paga o acompanhamento por waypoint NOVO (acima do máximo já atingido); parado ou voltando = 0.
+            best = getattr(self, "_best_wp", 0)
+            adv = max(self._wp_idx - best, 0)
+            self._best_wp = max(best, self._wp_idx)
+            r_track = (r_cte + r_align) * adv
+
+        self._last_terms = {"cte": float(r_cte), "align": float(r_align), "track": float(r_track),
+                            "prog": float(r_prog), "stable": float(r_stable), "smooth": float(r_smooth)}
+        return r_track + r_prog + r_stable + r_smooth
 
     def _env_constraints(self) -> None:
         # Draw the full trajectory at a fixed stride so the rendered path stays
@@ -973,6 +984,7 @@ class TrajectoryEnv(NavEnv):
         self._last_norm = None
         self._on_target = False
         self._wp_idx = 0
+        self._best_wp = 0
         self._prev_progress = 0.0
         return self._wrap_state(state), {}
 
@@ -1003,19 +1015,22 @@ class TrajectoryEnv(NavEnv):
         if reached_end:
             self._on_target_buf += 1
 
-        terminated = bool(
-            (abs(r_ang) > np.radians(15))
-            or (abs(p_ang) > np.radians(15))
-            or out_of_bounds
-            or reached_end
-        )
+        tilt = bool((abs(r_ang) > np.radians(15)) or (abs(p_ang) > np.radians(15)))
+        terminated = bool(tilt or out_of_bounds or reached_end)
         truncated = bool(self._episode_steps >= self.max_episode_steps or strayed)
 
-        reward = self._reward()
+        shaping = self._reward()
         self._prev_progress = prog
 
+        reward = shaping
         if reached_end:
             reward += self.BONUS_END
+
+        reason = self._termination_reason(reached_end, {"tilt": tilt, "out_of_bounds": out_of_bounds}, False)
+        if reason is None and truncated:
+            reason = "strayed" if strayed else "timeout"
+        if self._reward_version != "v0" and reason in ("tilt", "out_of_bounds"):
+            reward += self.TERM_PENALTY               # v1: cair/sair da área não empata com ficar parado
 
         info = {
             "waypoint_index": self._wp_idx,
@@ -1023,6 +1038,8 @@ class TrajectoryEnv(NavEnv):
             "cross_track_error": abs(cte),
             "reached_end": reached_end,
             "reached_goals": int(self._on_target_buf),
+            "termination_reason": reason,
+            "reward_terms": {**self._last_terms, "terminal": float(reward - shaping)},
         }
         return obs, float(reward), terminated, truncated, info
 
