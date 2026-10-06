@@ -225,8 +225,32 @@ class HoverEnv(BiguaGymEnv):
         yaw_rate = abs(ang_vel[2])
         spin_reward = -yaw_rate * 0.2
 
+        self._last_terms = {"norm": float(norm_reward), "smooth": float(smooth_reward),
+                            "stable": float(stable_reward), "spin": float(spin_reward)}
         return norm_reward + smooth_reward + stable_reward + spin_reward
-    
+
+    # ------------------------------------------------------------------
+    # Recompensa de término (spec recompensas, reward_version="v1")
+    # ------------------------------------------------------------------
+    TERM_PENALTY = -10.0   # término por falha (inclinação, fora da área, pouso/docagem dura)
+    SUCCESS_BONUS = 10.0   # alvo atingido (LandEnv/DockEnv: 20)
+
+    @staticmethod
+    def _termination_reason(success: bool, failures: dict, truncated: bool):
+        """Motivo do fim do passo: "success", a 1ª falha verdadeira de ``failures``, "timeout" ou None."""
+        if success:
+            return "success"
+        for name, hit in failures.items():
+            if hit:
+                return name
+        return "timeout" if truncated else None
+
+    def _terminal_reward(self, reason) -> float:
+        """Bônus/penalidade de término da v1 (0 na v0, ou quando o episódio não terminou)."""
+        if self._reward_version == "v0" or reason in (None, "timeout"):
+            return 0.0
+        return self.SUCCESS_BONUS if reason == "success" else self.TERM_PENALTY
+
     def _env_constraints(self) -> None:
         self._env.draw_point(self._target_list)
 
@@ -252,15 +276,26 @@ class HoverEnv(BiguaGymEnv):
         out_of_bounds = bool(
             np.any((pos < self._bounds[0]) | (pos > self._bounds[1]))
         )
-        terminated = bool(
-            (abs(r) > np.radians(15))
-            or (abs(p) > np.radians(15))
-            or out_of_bounds
-            or self._on_target
-        )
+        tilt = bool((abs(r) > np.radians(15)) or (abs(p) > np.radians(15)))
 
-        reward = 3.0 * abs(self._reward()) if self._on_target else self._reward()
-        info = {"reached_goals": int(self._on_target_buf)}
+        if self._reward_version == "v0":
+            # Original: o término usa o _on_target do passo ANTERIOR (o _reward() o atualiza depois),
+            # então o sucesso só termina — e recebe 3·|r| — um passo depois de atingir o alvo.
+            success = self._on_target
+            terminated = bool(tilt or out_of_bounds or success)
+            shaping = self._reward()
+            reward = 3.0 * abs(shaping) if success else shaping
+        else:
+            shaping = self._reward()            # atualiza _on_target com o estado deste passo
+            success = self._on_target
+            terminated = bool(tilt or out_of_bounds or success)
+            reward = shaping
+
+        reason = self._termination_reason(success, {"tilt": tilt, "out_of_bounds": out_of_bounds}, truncated)
+        reward += self._terminal_reward(reason)
+        info = {"reached_goals": int(self._on_target_buf),
+                "termination_reason": reason,
+                "reward_terms": {**self._last_terms, "terminal": float(reward - shaping)}}
         return obs, float(reward), terminated, truncated, info
 
     def update_target_factor(self, factor: int) -> None:
