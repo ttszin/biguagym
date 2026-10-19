@@ -47,6 +47,7 @@ class HoverEnv(BiguaGymEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         output_mode = "timestep" if timestep else "gym"
 
@@ -55,6 +56,12 @@ class HoverEnv(BiguaGymEnv):
         if reward_version not in ("v0", "v1"):
             raise ValueError(f"reward_version inválido: {reward_version!r} (use 'v0' ou 'v1')")
         self._reward_version = reward_version
+
+        # Versão da geometria/observação (spec ajuste-ambientes): "v0" = original; "v1" = spawn subaquático mais
+        # fundo, tetos com folga, inclinação máxima por domínio, alvo do barco na superfície e alvo na observação.
+        if env_version not in ("v0", "v1"):
+            raise ValueError(f"env_version inválido: {env_version!r} (use 'v0' ou 'v1')")
+        self._env_version = env_version
 
         self._agent_type = agent_type
         self._location = location
@@ -331,10 +338,11 @@ class LandEnv(HoverEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation, batch_size, observation_type,
-                         show_viewer, timestep, action_stack, target_factor, render_mode, reward_version=reward_version)
+                         show_viewer, timestep, action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version)
         
     @property
     def max_episode_steps(self) -> int:
@@ -506,10 +514,11 @@ class DockEnv(LandEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation, batch_size, observation_type,
-                         show_viewer, timestep, action_stack, target_factor, render_mode, reward_version=reward_version)
+                         show_viewer, timestep, action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version)
         
     
     def _build_params(self):
@@ -604,10 +613,11 @@ class NavEnv(HoverEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation, batch_size, observation_type,
-                         show_viewer, timestep, action_stack, target_factor, render_mode, reward_version=reward_version)
+                         show_viewer, timestep, action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version)
         
     
     def _build_params(self):
@@ -680,6 +690,7 @@ class TrajectoryEnv(NavEnv):
         waypoint_radius: float = 0.2,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         # Must be set before super().__init__() triggers _init_spaces()
         self._n_lookahead = n_lookahead
@@ -687,7 +698,7 @@ class TrajectoryEnv(NavEnv):
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation,
                          batch_size, observation_type, show_viewer, timestep,
-                         action_stack, target_factor, render_mode, reward_version=reward_version)
+                         action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version)
 
         # --- Build trajectory (needs self.rng and self._location from super) ---
         if isinstance(target_trajectory, np.ndarray):
@@ -1311,13 +1322,14 @@ class HoverPixelEnv(_PixelObsMixin, HoverEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
-            action_stack, target_factor, render_mode, reward_version=reward_version,
+            action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version,
         )
         self._setup_pixel(frame_stack, frame_size, include_state, render_channel)
 
@@ -1345,13 +1357,14 @@ class LandPixelEnv(_PixelObsMixin, LandEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
-            action_stack, target_factor, render_mode, reward_version=reward_version,
+            action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version,
         )
         self._setup_pixel(frame_stack, frame_size, include_state, render_channel)
 
@@ -1379,13 +1392,14 @@ class DockPixelEnv(_PixelObsMixin, DockEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
-            action_stack, target_factor, render_mode, reward_version=reward_version,
+            action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version,
         )
         self._setup_pixel(frame_stack, frame_size, include_state, render_channel)
 
@@ -1413,13 +1427,14 @@ class NavPixelEnv(_PixelObsMixin, NavEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
-            action_stack, target_factor, render_mode, reward_version=reward_version,
+            action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version,
         )
         self._setup_pixel(frame_stack, frame_size, include_state, render_channel)
 
@@ -1450,6 +1465,7 @@ class TrajectoryPixelEnv(_PixelObsMixin, TrajectoryEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1457,7 +1473,7 @@ class TrajectoryPixelEnv(_PixelObsMixin, TrajectoryEnv):
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
             action_stack, target_factor, target_trajectory, n_lookahead,
-            waypoint_radius, render_mode, reward_version=reward_version,
+            waypoint_radius, render_mode, reward_version=reward_version, env_version=env_version,
         )
         self._setup_pixel(frame_stack, frame_size, include_state, render_channel)
 
@@ -1512,6 +1528,7 @@ class LandCoopPixelEnv(_PixelObsMixin, LandEnv):
         trajectory_speed: float = 0.02,
         camera_half_fov_deg: float = 45.0,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1525,7 +1542,7 @@ class LandCoopPixelEnv(_PixelObsMixin, LandEnv):
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
-            action_stack, target_factor, render_mode, reward_version=reward_version,
+            action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version,
         )
         self._setup_pixel(frame_stack, frame_size, include_state, render_channel)
 
@@ -1742,11 +1759,12 @@ class NavRangeEnv(_RangeObsMixin, NavEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
-            action_stack, target_factor, render_mode, reward_version=reward_version,
+            action_stack, target_factor, render_mode, reward_version=reward_version, env_version=env_version,
         )
 
 
@@ -1775,10 +1793,11 @@ class TrajectoryRangeEnv(_RangeObsMixin, TrajectoryEnv):
         waypoint_radius: float = 0.2,
         render_mode: str = None,
         reward_version: str = "v1",
+        env_version: str = "v1",
     ) -> None:
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
             batch_size, observation_type, show_viewer, timestep,
             action_stack, target_factor, target_trajectory, n_lookahead,
-            waypoint_radius, render_mode, reward_version=reward_version,
+            waypoint_radius, render_mode, reward_version=reward_version, env_version=env_version,
         )
