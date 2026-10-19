@@ -32,6 +32,8 @@ class HoverEnv(BiguaGymEnv):
     curriculum via ``target_factor`` resamples the target only every N successes.
     """
 
+    _HAS_TARGET = True                 # TrajectoryEnv: False (tem o caminho na observação e não tem _target)
+
     # Geometria da versão "v1" do ambiente (spec ajuste-ambientes)
     UNDERWATER_SPAWN_Z = -1.5          # o register.py põe os subaquáticos em -0,2, a 10 cm do teto (-0,1)
     AIR_CEILING_ABOVE_SPAWN = 5.0      # teto do Hover/Land: antes era a própria altura do spawn
@@ -168,10 +170,23 @@ class HoverEnv(BiguaGymEnv):
         raw = state.get('CameraView')
         if raw is not None:
             self._last_render_frame = np.asarray(raw, dtype=np.uint8)[:, :, 0:3]
-        return np.concatenate([
+        obs = np.concatenate([
             np.asarray(v, dtype=np.float32).ravel()
             for v in self._getter(state)
         ])
+        if self._target_in_obs():
+            # alvo relativo ao veículo (referencial do mundo); sem alvo ou dinâmica ainda: zeros
+            if self._target is None or self._dynamics is None:
+                rel = np.zeros(3, dtype=np.float32)
+            else:
+                rel = (np.asarray(self._target, dtype=np.float64)[:3]
+                       - np.asarray(self._dynamics[6:9], dtype=np.float64)).astype(np.float32)
+            obs = np.concatenate([obs, rel])
+        return obs
+
+    def _target_in_obs(self) -> bool:
+        """v1: a posição do alvo relativa ao veículo entra na observação (3 valores) nos ambientes com alvo."""
+        return self._env_version == "v1" and self._HAS_TARGET
 
     @staticmethod
     def _unwrap_state(state: dict) -> dict:
@@ -208,6 +223,8 @@ class HoverEnv(BiguaGymEnv):
 
     def _init_spaces(self) -> None:
         total_dim = sum(int(np.prod(shape)) for shape in self.obs_cfg.values())
+        if self._target_in_obs():
+            total_dim += 3
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -690,6 +707,8 @@ class TrajectoryEnv(NavEnv):
     - Angular-velocity smoothness penalty
     - End-of-trajectory bonus on success
     """
+
+    _HAS_TARGET = False                # o caminho já está na observação (_traj_obs); não há _target
 
     # Reward zone thresholds (metres)
     ZONE_EXACT = 0.5
