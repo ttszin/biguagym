@@ -199,6 +199,9 @@ class HoverEnv(BiguaGymEnv):
 
         if self._on_target_buf % self._target_factor == 0:
             self._target : NDArray = self.rng.uniform(low=self._bounds[0], high=self._bounds[1])
+            if self._env_version == "v1" and self._agent_type in DOMAIN['surface']:
+                # o barco fica na superfície: um alvo em z ∈ [-1; 0,1] nunca era atingido (sucesso: ‖alvo − pos‖ ≤ 0,15)
+                self._target[2] = float(self._location[2])
             self._target_list = self._target.tolist()
 
         return self._wrap_state(state), {}
