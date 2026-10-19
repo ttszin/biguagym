@@ -32,6 +32,18 @@ class HoverEnv(BiguaGymEnv):
     curriculum via ``target_factor`` resamples the target only every N successes.
     """
 
+    # Geometria da versão "v1" do ambiente (spec ajuste-ambientes)
+    UNDERWATER_SPAWN_Z = -1.5          # o register.py põe os subaquáticos em -0,2, a 10 cm do teto (-0,1)
+    AIR_CEILING_ABOVE_SPAWN = 5.0      # teto do Hover/Land: antes era a própria altura do spawn
+
+    @classmethod
+    def _spawn_location(cls, agent_type: str, location: list, env_version: str) -> list:
+        """Na v1, os subaquáticos nascem em UNDERWATER_SPAWN_Z (folga de 1,4 m até o teto em -0,1)."""
+        if (env_version == "v1" and agent_type in DOMAIN['underwater']
+                and float(location[2]) > cls.UNDERWATER_SPAWN_Z):
+            return [location[0], location[1], cls.UNDERWATER_SPAWN_Z]
+        return location
+
     def __init__(
         self,
         seed: int,
@@ -64,7 +76,7 @@ class HoverEnv(BiguaGymEnv):
         self._env_version = env_version
 
         self._agent_type = agent_type
-        self._location = location
+        self._location = self._spawn_location(agent_type, location, env_version)
         self._rotation = rotation
         self._batch_size = batch_size
         self._control_abstraction = control_abstraction
@@ -122,7 +134,10 @@ class HoverEnv(BiguaGymEnv):
 
         # Keep z-min above ground.
         self._bounds[0, 2] = max(float(self._bounds[0, 2]), 0.1)
-        self._bounds[1, 2] = max(float(loc[2]), 2.0 * self._bounds[0, 2])
+        if self._env_version == "v0":
+            self._bounds[1, 2] = max(float(loc[2]), 2.0 * self._bounds[0, 2])   # original: teto = altura do spawn
+        else:
+            self._bounds[1, 2] = float(loc[2]) + self.AIR_CEILING_ABOVE_SPAWN
 
         if isinstance(self._observation_type, str):
             self._observation_type = [self._observation_type]
@@ -528,7 +543,10 @@ class DockEnv(LandEnv):
         self._bounds = np.array([loc - 10.0, loc + 10.0])
 
         # Keep z-min above ground.
-        self._bounds[0, 2] = min(float(self._bounds[0, 2] + 10), -0.2)
+        if self._env_version == "v0":
+            self._bounds[0, 2] = min(float(self._bounds[0, 2] + 10), -0.2)   # original: teto = altura do spawn
+        else:
+            self._bounds[0, 2] = -0.1                                       # teto na superfície
         self._bounds[1, 2] = -10
 
         return env_params, obs_params
