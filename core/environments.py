@@ -36,6 +36,17 @@ class HoverEnv(BiguaGymEnv):
     UNDERWATER_SPAWN_Z = -1.5          # o register.py põe os subaquáticos em -0,2, a 10 cm do teto (-0,1)
     AIR_CEILING_ABOVE_SPAWN = 5.0      # teto do Hover/Land: antes era a própria altura do spawn
 
+    # Inclinação (roll/pitch) máxima antes de terminar por "tilt", por domínio, na v1. Drone e ROV: 60° (decisão do
+    # usuário em 2026-10-19; com cmd_motor_speeds, 15° era atingido em ~6 passos com ação aleatória). Barco: 15°.
+    TILT_LIMIT_DEG = {'aereo': 60.0, 'multi-domain': 60.0, 'underwater': 60.0, 'surface': 15.0}
+
+    def _tilt_limit(self) -> float:
+        """Inclinação máxima em radianos (v0: 15° para todos)."""
+        if self._env_version == "v0":
+            return np.radians(15)
+        dominio = next((d for d, tipos in DOMAIN.items() if self._agent_type in tipos), 'aereo')
+        return np.radians(self.TILT_LIMIT_DEG[dominio])
+
     @classmethod
     def _spawn_location(cls, agent_type: str, location: list, env_version: str) -> list:
         """Na v1, os subaquáticos nascem em UNDERWATER_SPAWN_Z (folga de 1,4 m até o teto em -0,1)."""
@@ -298,7 +309,7 @@ class HoverEnv(BiguaGymEnv):
         out_of_bounds = bool(
             np.any((pos < self._bounds[0]) | (pos > self._bounds[1]))
         )
-        tilt = bool((abs(r) > np.radians(15)) or (abs(p) > np.radians(15)))
+        tilt = bool((abs(r) > self._tilt_limit()) or (abs(p) > self._tilt_limit()))
 
         if self._reward_version == "v0":
             # Original: o término usa o _on_target do passo ANTERIOR (o _reward() o atualiza depois),
@@ -466,7 +477,7 @@ class LandEnv(HoverEnv):
         descent_speed = max(float(-vel[2]), 0.0)
         hard_landing = bool(proximity_weight > 0.5 and descent_speed > 2.0)
 
-        tilt = bool((abs(r) > np.radians(15)) or (abs(p) > np.radians(15)))
+        tilt = bool((abs(r) > self._tilt_limit()) or (abs(p) > self._tilt_limit()))
         failures = {"hard_landing": hard_landing, "tilt": tilt, "out_of_bounds": out_of_bounds}
         reward, terminated, reason, shaping = self._land_like_reward(failures, "hard_landing", truncated)
 
@@ -597,7 +608,7 @@ class DockEnv(LandEnv):
         descent_speed = max(float(-vel[2]), 0.0)
         hard_docking = bool(proximity_weight > 0.5 and descent_speed > 2.0)
 
-        tilt = bool((abs(r) > np.radians(15)) or (abs(p) > np.radians(15)))
+        tilt = bool((abs(r) > self._tilt_limit()) or (abs(p) > self._tilt_limit()))
         failures = {"hard_docking": hard_docking, "tilt": tilt, "out_of_bounds": out_of_bounds}
         reward, terminated, reason, shaping = self._land_like_reward(failures, "hard_docking", truncated)
 
@@ -1044,7 +1055,7 @@ class TrajectoryEnv(NavEnv):
         if reached_end:
             self._on_target_buf += 1
 
-        tilt = bool((abs(r_ang) > np.radians(15)) or (abs(p_ang) > np.radians(15)))
+        tilt = bool((abs(r_ang) > self._tilt_limit()) or (abs(p_ang) > self._tilt_limit()))
         terminated = bool(tilt or out_of_bounds or reached_end)
         truncated = bool(self._episode_steps >= self.max_episode_steps or strayed)
 
@@ -1734,8 +1745,8 @@ class LandCoopPixelEnv(_PixelObsMixin, LandEnv):
         hard_landing = bool(proximity_weight > 0.5 and descent_speed > 2.0)
 
         terminated = bool(
-            (abs(r) > np.radians(15))
-            or (abs(p) > np.radians(15))
+            (abs(r) > self._tilt_limit())
+            or (abs(p) > self._tilt_limit())
             or out_of_bounds
             or self._on_target
             or hard_landing
