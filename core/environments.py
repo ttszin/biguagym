@@ -42,6 +42,11 @@ class HoverEnv(BiguaGymEnv):
     # usuário em 2026-10-19; com cmd_motor_speeds, 15° era atingido em ~6 passos com ação aleatória). Barco: 15°.
     TILT_LIMIT_DEG = {'aereo': 60.0, 'multi-domain': 60.0, 'underwater': 60.0, 'surface': 15.0}
 
+    # BlueBoatNav na v2 (spec colapso-blueboat): alvo longe da borda da área e raio de sucesso de superfície.
+    TARGET_MARGIN_SURFACE = 3.0        # m entre o alvo e a borda (x, y) da área
+    SUCCESS_RADIUS = 0.15              # m (todos os ambientes até a v1)
+    SUCCESS_RADIUS_SURFACE = 1.0       # m (BlueBoatNav v2: raio de aceitação de waypoint de um barco de 1,2 m)
+
     def _tilt_limit(self) -> float:
         """Inclinação máxima em radianos (v0: 15° para todos)."""
         if self._env_version == "v0":
@@ -49,10 +54,15 @@ class HoverEnv(BiguaGymEnv):
         dominio = next((d for d, tipos in DOMAIN.items() if self._agent_type in tipos), 'aereo')
         return np.radians(self.TILT_LIMIT_DEG[dominio])
 
+    def _boat_nav_v2(self) -> bool:
+        """v2: ajustes do BlueBoatNav (superfície, com alvo): alvo longe da borda, raio de sucesso de superfície e
+        ação normalizada em [-1, 1]. Fora disso, v2 = v1 (o BlueBoatTrajectoryFollower não tem alvo)."""
+        return self._env_version == "v2" and self._agent_type in DOMAIN['surface'] and self._HAS_TARGET
+
     @classmethod
     def _spawn_location(cls, agent_type: str, location: list, env_version: str) -> list:
         """Na v1, os subaquáticos nascem em UNDERWATER_SPAWN_Z (folga de 1,4 m até o teto em -0,1)."""
-        if (env_version == "v1" and agent_type in DOMAIN['underwater']
+        if (env_version != "v0" and agent_type in DOMAIN['underwater']
                 and float(location[2]) > cls.UNDERWATER_SPAWN_Z):
             return [location[0], location[1], cls.UNDERWATER_SPAWN_Z]
         return location
@@ -72,20 +82,21 @@ class HoverEnv(BiguaGymEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         output_mode = "timestep" if timestep else "gym"
 
         # Versão da recompensa (spec recompensas): "v0" = original, "v1" = penalidade de término,
         # bônus de sucesso fixo e Trajectory paga por avanço.
         if reward_version not in ("v0", "v1"):
-            raise ValueError(f"reward_version inválido: {reward_version!r} (use 'v0' ou 'v1')")
+            raise ValueError(f"reward_version inválido: {reward_version!r} (use 'v0', 'v1' ou 'v2')")
         self._reward_version = reward_version
 
         # Versão da geometria/observação (spec ajuste-ambientes): "v0" = original; "v1" = spawn subaquático mais
-        # fundo, tetos com folga, inclinação máxima por domínio, alvo do barco na superfície e alvo na observação.
-        if env_version not in ("v0", "v1"):
-            raise ValueError(f"env_version inválido: {env_version!r} (use 'v0' ou 'v1')")
+        # fundo, tetos com folga, inclinação máxima por domínio, alvo do barco na superfície e alvo na observação;
+        # "v2" (padrão, spec colapso-blueboat) = v1 + ajustes do BlueBoatNav (ver _boat_nav_v2).
+        if env_version not in ("v0", "v1", "v2"):
+            raise ValueError(f"env_version inválido: {env_version!r} (use 'v0', 'v1' ou 'v2')")
         self._env_version = env_version
 
         self._agent_type = agent_type
@@ -186,7 +197,7 @@ class HoverEnv(BiguaGymEnv):
 
     def _target_in_obs(self) -> bool:
         """v1: a posição do alvo relativa ao veículo entra na observação (3 valores) nos ambientes com alvo."""
-        return self._env_version == "v1" and self._HAS_TARGET
+        return self._env_version != "v0" and self._HAS_TARGET
 
     @staticmethod
     def _unwrap_state(state: dict) -> dict:
@@ -213,8 +224,13 @@ class HoverEnv(BiguaGymEnv):
         self._on_target = False
 
         if self._on_target_buf % self._target_factor == 0:
-            self._target : NDArray = self.rng.uniform(low=self._bounds[0], high=self._bounds[1])
-            if self._env_version == "v1" and self._agent_type in DOMAIN['surface']:
+            low, high = self._bounds[0].copy(), self._bounds[1].copy()
+            if self._boat_nav_v2():
+                # v2: alvo a TARGET_MARGIN_SURFACE da borda, que também é o limite de saída (sobra espaço para frear)
+                low[:2] += self.TARGET_MARGIN_SURFACE
+                high[:2] -= self.TARGET_MARGIN_SURFACE
+            self._target : NDArray = self.rng.uniform(low=low, high=high)
+            if self._env_version != "v0" and self._agent_type in DOMAIN['surface']:
                 # o barco fica na superfície: um alvo em z ∈ [-1; 0,1] nunca era atingido (sucesso: ‖alvo − pos‖ ≤ 0,15)
                 self._target[2] = float(self._location[2])
             self._target_list = self._target.tolist()
@@ -237,9 +253,17 @@ class HoverEnv(BiguaGymEnv):
         dyn = getattr(self._env, '_dynamics_dict', {}).get('robot')
         dyn_params = getattr(dyn, 'params', None) or {}
         if self._control_abstraction == 'cmd_motor_speeds' and dyn_params.get('rotor_pos'):
+            self._motor_lo = float(dyn_params['rotor_speed_min'])
+            self._motor_hi = float(dyn_params['rotor_speed_max'])
+            if self._boat_nav_v2():
+                # v2: ação em [-1, 1], convertida para rad/s em _to_motor_speeds (o crítico vê a ação na escala da
+                # observação, não em ±290)
+                self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(len(dyn_params['rotor_pos']),),
+                                               dtype=np.float32)
+                return
             self.action_space = spaces.Box(
-                low=float(dyn_params['rotor_speed_min']),
-                high=float(dyn_params['rotor_speed_max']),
+                low=self._motor_lo,
+                high=self._motor_hi,
                 shape=(len(dyn_params['rotor_pos']),),
                 dtype=np.float32,
             )
@@ -251,6 +275,11 @@ class HoverEnv(BiguaGymEnv):
             dtype=np.float32,
         )
 
+    def _to_motor_speeds(self, action) -> NDArray:
+        """v2 do BlueBoatNav: [-1, 1] → rad/s. 0 → 0; +1 → máximo; -1 → mínimo (limites assimétricos)."""
+        a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+        return np.where(a >= 0, a * self._motor_hi, -a * self._motor_lo).astype(np.float32)
+
     def _reward(self):
         target = self._target
         pos = np.asarray(self._dynamics[6:9])
@@ -259,7 +288,8 @@ class HoverEnv(BiguaGymEnv):
 
         norm = np.linalg.norm(target - pos)
 
-        self._on_target = abs(norm) <= 0.15
+        raio = self.SUCCESS_RADIUS_SURFACE if self._boat_nav_v2() else self.SUCCESS_RADIUS
+        self._on_target = abs(norm) <= raio
         if self._on_target:
             self._on_target_buf += 1
 
@@ -312,6 +342,8 @@ class HoverEnv(BiguaGymEnv):
         self._episode_steps += self._action_repeat
 
         flat = np.asarray(action, dtype=np.float32).ravel()
+        if self._boat_nav_v2():
+            flat = self._to_motor_speeds(flat)
         if self._batch_size > 1:
             action_arg = np.tile(flat, (self._batch_size, 1)).tolist()
         else:
@@ -384,7 +416,7 @@ class LandEnv(HoverEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation, batch_size, observation_type,
@@ -560,7 +592,7 @@ class DockEnv(LandEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation, batch_size, observation_type,
@@ -662,7 +694,7 @@ class NavEnv(HoverEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
 
         super().__init__(seed, agent_type, control_abstraction, location, rotation, batch_size, observation_type,
@@ -741,7 +773,7 @@ class TrajectoryEnv(NavEnv):
         waypoint_radius: float = 0.2,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         # Must be set before super().__init__() triggers _init_spaces()
         self._n_lookahead = n_lookahead
@@ -1373,7 +1405,7 @@ class HoverPixelEnv(_PixelObsMixin, HoverEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1408,7 +1440,7 @@ class LandPixelEnv(_PixelObsMixin, LandEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1443,7 +1475,7 @@ class DockPixelEnv(_PixelObsMixin, DockEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1478,7 +1510,7 @@ class NavPixelEnv(_PixelObsMixin, NavEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1516,7 +1548,7 @@ class TrajectoryPixelEnv(_PixelObsMixin, TrajectoryEnv):
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1579,7 +1611,7 @@ class LandCoopPixelEnv(_PixelObsMixin, LandEnv):
         trajectory_speed: float = 0.02,
         camera_half_fov_deg: float = 45.0,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         self._pixel_channels = pixel_channels if pixel_channels is not None else ['rgb']
         self._render_channel = render_channel
@@ -1810,7 +1842,7 @@ class NavRangeEnv(_RangeObsMixin, NavEnv):
         target_factor: int = 1,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
@@ -1844,7 +1876,7 @@ class TrajectoryRangeEnv(_RangeObsMixin, TrajectoryEnv):
         waypoint_radius: float = 0.2,
         render_mode: str = None,
         reward_version: str = "v1",
-        env_version: str = "v1",
+        env_version: str = "v2",
     ) -> None:
         super().__init__(
             seed, agent_type, control_abstraction, location, rotation,
