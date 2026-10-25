@@ -55,9 +55,13 @@ class HoverEnv(BiguaGymEnv):
         return np.radians(self.TILT_LIMIT_DEG[dominio])
 
     def _boat_nav_v2(self) -> bool:
-        """v2: ajustes do BlueBoatNav (superfície, com alvo): alvo longe da borda, raio de sucesso de superfície e
-        ação normalizada em [-1, 1]. Fora disso, v2 = v1 (o BlueBoatTrajectoryFollower não tem alvo)."""
+        """v2: ajustes do BlueBoatNav (superfície, com alvo): alvo longe da borda e raio de sucesso de superfície.
+        Fora disso, v2 = v1 (o BlueBoatTrajectoryFollower não tem alvo)."""
         return self._env_version == "v2" and self._agent_type in DOMAIN['surface'] and self._HAS_TARGET
+
+    def _boat_acao_v2(self) -> bool:
+        """v2: ação normalizada em [-1, 1] nos ambientes de superfície (BlueBoatNav e BlueBoatTrajectoryFollower)."""
+        return self._env_version == "v2" and self._agent_type in DOMAIN['surface']
 
     @classmethod
     def _spawn_location(cls, agent_type: str, location: list, env_version: str) -> list:
@@ -255,7 +259,7 @@ class HoverEnv(BiguaGymEnv):
         if self._control_abstraction == 'cmd_motor_speeds' and dyn_params.get('rotor_pos'):
             self._motor_lo = float(dyn_params['rotor_speed_min'])
             self._motor_hi = float(dyn_params['rotor_speed_max'])
-            if self._boat_nav_v2():
+            if self._boat_acao_v2():
                 # v2: ação em [-1, 1], convertida para rad/s em _to_motor_speeds (o crítico vê a ação na escala da
                 # observação, não em ±290)
                 self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(len(dyn_params['rotor_pos']),),
@@ -276,7 +280,7 @@ class HoverEnv(BiguaGymEnv):
         )
 
     def _to_motor_speeds(self, action) -> NDArray:
-        """v2 do BlueBoatNav: [-1, 1] → rad/s. 0 → 0; +1 → máximo; -1 → mínimo (limites assimétricos)."""
+        """v2 dos ambientes de superfície: [-1, 1] → rad/s. 0 → 0; +1 → máximo; -1 → mínimo (limites assimétricos)."""
         a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         return np.where(a >= 0, a * self._motor_hi, -a * self._motor_lo).astype(np.float32)
 
@@ -342,7 +346,7 @@ class HoverEnv(BiguaGymEnv):
         self._episode_steps += self._action_repeat
 
         flat = np.asarray(action, dtype=np.float32).ravel()
-        if self._boat_nav_v2():
+        if self._boat_acao_v2():
             flat = self._to_motor_speeds(flat)
         if self._batch_size > 1:
             action_arg = np.tile(flat, (self._batch_size, 1)).tolist()
@@ -1087,6 +1091,8 @@ class TrajectoryEnv(NavEnv):
         self._episode_steps += self._action_repeat
 
         flat = np.asarray(action, dtype=np.float32).ravel()
+        if self._boat_acao_v2():
+            flat = self._to_motor_speeds(flat)
         action_arg = (
             np.tile(flat, (self._batch_size, 1)).tolist()
             if self._batch_size > 1 else flat.tolist()
