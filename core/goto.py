@@ -67,6 +67,10 @@ class GotoEnv(HoverEnv):
     VZ_MAX = 0.3
     TICKS_POR_S = 20                     # state.json: ticks_per_sec
     YAW_DESVIO_MAX = math.radians(45.0)  # desvio máximo enviado ao cmd_vel_yaw
+    # O motor do BiguaSim 1.1.0 não aplica a aceleração angular ao Hydrone (spec rotacao-hydrone); a integração angular é
+    # feita aqui e a velocidade angular é imposta a cada tick. O motor amortece a ω imposta a ~1 s⁻¹ (0,524 → 0,498 rad/s
+    # em um tick de 0,05 s, tools/diag_rotacao_hydrone.py).
+    AMORTECIMENTO_ANGULAR_MOTOR = 1.0
 
     # Recompensa e término do Dranaju (setReward/getState)
     GANHO_DIST = 0.1
@@ -100,7 +104,12 @@ class GotoEnv(HoverEnv):
         cenario: str = 'pilares',
         reward_version: str = "v1",
         env_version: str = "v2",
+        integrar_rotacao: bool = True,
     ) -> None:
+        if integrar_rotacao and batch_size != 1:
+            raise ValueError("integrar_rotacao só funciona com batch_size = 1")
+        self._integrar_rotacao = integrar_rotacao
+        self._w_dot = np.zeros(3)
         self._cena = carregar_cenario(cenario)
         self._cenario = cenario
         if self._cena.get('provisorio'):
@@ -217,6 +226,41 @@ class GotoEnv(HoverEnv):
         return np.array([v * math.cos(psi), v * math.sin(psi), vz, math.degrees(desvio)], dtype=np.float32)
 
     # ------------------------------------------------------------------
+    # Integração angular (spec rotacao-hydrone)
+    # ------------------------------------------------------------------
+    def _instalar_integrador(self) -> None:
+        """Envolve o step da dinâmica do BiguaSim: guarda ω̇ e manda ao motor só a aceleração linear."""
+        modelo = self._env._dynamics_dict['robot']
+        if getattr(modelo, '_step_original', None) is None:
+            modelo._step_original = modelo.step
+        original = modelo._step_original
+
+        def step(*a, **k):
+            acc = np.asarray(original(*a, **k), dtype=np.float64).reshape(-1, 6)
+            self._w_dot = acc[0, 3:6].copy()
+            acc[:, 3:6] = 0.0
+            return acc.tolist()
+
+        modelo.step = step
+
+    def _impor_rotacao(self, state: dict) -> None:
+        """Impõe ω + ω̇·dt (mundo) para o próximo tick, mantendo posição, atitude e velocidade linear."""
+        dt = 1.0 / self.TICKS_POR_S
+        w = np.asarray(state['DynamicsSensor'], dtype=np.float64).ravel()[12:15]
+        rpy = np.asarray(state['RPYDynamicsSensor'], dtype=np.float64).ravel()
+        w_novo = (w + self._w_dot * dt) * math.exp(self.AMORTECIMENTO_ANGULAR_MOTOR * dt)
+        self._env.agents['robot-id0'].set_physics_state(rpy[6:9], rpy[15:18], rpy[3:6], np.degrees(w_novo))
+
+    def _passo_sim(self, action_arg) -> dict:
+        """Avança ``action_repeat`` ticks; com a integração ligada, um tick por vez, impondo ω depois de cada um."""
+        if not self._integrar_rotacao:
+            return self._env.step(action_arg, action_repeat=self._action_repeat)
+        for _ in range(self._action_repeat):
+            raw = self._env.step(action_arg, action_repeat=1)
+            self._impor_rotacao(self._unwrap_state(raw))
+        return raw
+
+    # ------------------------------------------------------------------
     # Colisão, observação, reset e passo
     # ------------------------------------------------------------------
     def _colisao(self, state: dict):
@@ -264,6 +308,9 @@ class GotoEnv(HoverEnv):
 
     def _reset(self):
         state = self._unwrap_state(self._env.reset())
+        self._w_dot = np.zeros(3)
+        if self._integrar_rotacao:
+            self._instalar_integrador()
         self._spawn_pilares()
         self._set_dynamics(state)
         self._episode_steps = 0
@@ -278,7 +325,7 @@ class GotoEnv(HoverEnv):
         self._episode_steps += self._action_repeat
         cmd = self._comando(action)
         action_arg = np.tile(cmd, (self._batch_size, 1)).tolist() if self._batch_size > 1 else cmd.tolist()
-        state = self._unwrap_state(self._env.step(action_arg, action_repeat=self._action_repeat))
+        state = self._unwrap_state(self._passo_sim(action_arg))
         self._set_dynamics(state)
         self._acao_ant = np.clip(np.asarray(action, dtype=np.float32).ravel()[:self.N_ACOES], -1.0, 1.0)
 
