@@ -382,3 +382,14 @@ gym.register(
     kwargs={'seed': 42, 'agent_type': 'TorpedoAUV', 'control_abstraction': 'cmd_rudders_sterns_motor_speed',
             'location': [100, 100, -0.2], 'rotation': [0, 0, 0]},
 )
+
+# ---------------------------------------------------------------------------
+# Goto do Hydrone no dique inundado (spec hydrone-goto-dique): cmd_vel_yaw com ação [frente, guinada, vertical] em
+# [-1, 1], recompensa do Dranaju; cenário em config/goto_dique.json ("pilares" = 4 pilares; "dique" = dique inteiro).
+# ---------------------------------------------------------------------------
+for _cena, _nome in (('pilares', 'Pilares'), ('dique', 'Dique')):
+    gym.register(
+        id=f"HydroneGoto{_nome}-v0",
+        entry_point="core.goto:GotoEnv",
+        kwargs={'seed': 42, 'agent_type': 'Hydrone', 'control_abstraction': 'cmd_vel_yaw', 'cenario': _cena},
+    )

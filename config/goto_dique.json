@@ -1,0 +1,42 @@
+{
+  "_comentario": "Spec hydrone-goto-dique. Coordenadas do mundo em metros; z de z_limites, pilares (base_z) e alvos é relativo a nivel_agua. PROVISÓRIO: tanque de 10 x 10 m em torno de (100, 100), como o do Depth-CUPRL, até o usuário trazer as coordenadas do dique inundado do Pier-Harbor.",
+  "cenarios": {
+    "pilares": {
+      "provisorio": true,
+      "nivel_agua": 0.0,
+      "origem": [100.0, 100.0],
+      "area": [[95.0, 95.0], [105.0, 105.0]],
+      "z_limites": [-1.1, 4.8],
+      "spawn": [103.6, 97.4, 2.0],
+      "spawn_yaw_deg": 0.0,
+      "pilares": [
+        {"xy": [98.0, 98.0], "raio": 0.5, "base_z": -3.0, "altura": 8.0},
+        {"xy": [98.0, 102.0], "raio": 0.5, "base_z": -3.0, "altura": 8.0},
+        {"xy": [102.0, 98.0], "raio": 0.5, "base_z": -3.0, "altura": 8.0},
+        {"xy": [102.0, 102.0], "raio": 0.5, "base_z": -3.0, "altura": 8.0}
+      ],
+      "exclusao": [],
+      "alvo_z_ar": [0.5, 3.0],
+      "alvo_z_agua": [-0.7, -0.3],
+      "p_alvo_agua": 0.5,
+      "folga_alvo": 1.0,
+      "dist_min_alvo": 2.0
+    },
+    "dique": {
+      "provisorio": true,
+      "nivel_agua": 0.0,
+      "origem": [100.0, 100.0],
+      "area": [[90.0, 90.0], [110.0, 110.0]],
+      "z_limites": [-1.1, 4.8],
+      "spawn": [103.6, 97.4, 2.0],
+      "spawn_yaw_deg": 0.0,
+      "pilares": [],
+      "exclusao": [],
+      "alvo_z_ar": [0.5, 3.0],
+      "alvo_z_agua": [-0.7, -0.3],
+      "p_alvo_agua": 0.5,
+      "folga_alvo": 1.0,
+      "dist_min_alvo": 2.0
+    }
+  }
+}
