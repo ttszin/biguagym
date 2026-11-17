@@ -123,6 +123,8 @@ class GotoEnv(HoverEnv):
         env_params['agents'][_id]['sensors'].append(
             {'sensor_type': 'CollisionSensor', 'location': [0, 0, 0], 'rotation': [0, 0, 0]})
         agua = float(self._cena['nivel_agua'])
+        # o mundo não exporta a superfície da água; a dinâmica do BiguaSim 1.1.0 aceita o nível em dynamics.water_level
+        env_params['agents'][_id]['dynamics']['water_level'] = agua
         (x0, y0), (x1, y1) = self._cena['area']
         z0, z1 = self._cena['z_limites']
         self._bounds = np.array([[x0, y0, agua + z0], [x1, y1, agua + z1]], dtype=np.float64)
