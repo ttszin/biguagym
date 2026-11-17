@@ -1254,6 +1254,15 @@ class _PixelObsMixin:
         # 'normal' has no backing sensor — always synthesised as zeros
     }
 
+    DEPTH_MAX_M = 5.0   # spec pipeline-pixels: escala fixa do Depth-CUPRL (255 = 5 m ou mais; antes, min–max por quadro)
+
+    @classmethod
+    def _depth_to_gray(cls, depth_map) -> NDArray:
+        """Profundidade em metros → [0, 255]: NaN/inf viram o máximo, corta em [0, DEPTH_MAX_M] e escala por 255/DEPTH_MAX_M."""
+        d = np.asarray(depth_map, dtype=np.float32)
+        d = np.where(np.isfinite(d), d, cls.DEPTH_MAX_M)
+        return np.clip(d, 0.0, cls.DEPTH_MAX_M) * (255.0 / cls.DEPTH_MAX_M)
+
     def _setup_pixel(
         self,
         frame_stack: int,
@@ -1297,6 +1306,10 @@ class _PixelObsMixin:
                 pixel_spaces[ch] = spaces.Box(
                     0, 255, (3 * self._frame_stack_n, *self._frame_size), np.uint8
                 )
+            elif ch == 'depth':
+                pixel_spaces[ch] = spaces.Box(
+                    0.0, 255.0, (3 * self._frame_stack_n, *self._frame_size), np.float32
+                )
             else:
                 pixel_spaces[ch] = spaces.Box(
                     -np.inf, np.inf, (3 * self._frame_stack_n, *self._frame_size), np.float32
@@ -1325,8 +1338,7 @@ class _PixelObsMixin:
                 raw_depth['depth_map'] if isinstance(raw_depth, dict) else raw_depth,
                 dtype=np.float32,
             )
-            d_min, d_max = float(depth_map.min()), float(depth_map.max())
-            gray = ((depth_map - d_min) / (d_max - d_min) * 255.0) if d_max > d_min else np.zeros_like(depth_map)
+            gray = self._depth_to_gray(depth_map)
             depth = np.stack([gray, gray, gray], axis=-1)
         else:
             depth = np.zeros((h, w, 3), dtype=np.float32)
@@ -1407,7 +1419,7 @@ class HoverPixelEnv(_PixelObsMixin, HoverEnv):
         render_mode: str = None,
         pixel_channels: list = None,
         frame_stack: int = 3,
-        frame_size: tuple = (84, 84),
+        frame_size: tuple = (100, 100),
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
@@ -1442,7 +1454,7 @@ class LandPixelEnv(_PixelObsMixin, LandEnv):
         render_mode: str = None,
         pixel_channels: list = None,
         frame_stack: int = 3,
-        frame_size: tuple = (84, 84),
+        frame_size: tuple = (100, 100),
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
@@ -1477,7 +1489,7 @@ class DockPixelEnv(_PixelObsMixin, DockEnv):
         render_mode: str = None,
         pixel_channels: list = None,
         frame_stack: int = 3,
-        frame_size: tuple = (84, 84),
+        frame_size: tuple = (100, 100),
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
@@ -1512,7 +1524,7 @@ class NavPixelEnv(_PixelObsMixin, NavEnv):
         render_mode: str = None,
         pixel_channels: list = None,
         frame_stack: int = 3,
-        frame_size: tuple = (84, 84),
+        frame_size: tuple = (100, 100),
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
@@ -1550,7 +1562,7 @@ class TrajectoryPixelEnv(_PixelObsMixin, TrajectoryEnv):
         render_mode: str = None,
         pixel_channels: list = None,
         frame_stack: int = 3,
-        frame_size: tuple = (84, 84),
+        frame_size: tuple = (100, 100),
         include_state: bool = False,
         render_channel: str | None = None,
         reward_version: str = "v1",
@@ -1609,7 +1621,7 @@ class LandCoopPixelEnv(_PixelObsMixin, LandEnv):
         render_mode: str = None,
         pixel_channels: list = None,
         frame_stack: int = 3,
-        frame_size: tuple = (84, 84),
+        frame_size: tuple = (100, 100),
         include_state: bool = False,
         render_channel: str | None = None,
         target_trajectory: str = 'sine',
