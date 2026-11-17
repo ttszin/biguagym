@@ -33,6 +33,7 @@ Public API
 import json
 import os
 
+import cv2
 import numpy as np
 import gymnasium as gym
 
@@ -102,7 +103,7 @@ class PixelStack:
         List of channel types to track, e.g. ``["rgb", "depth"]``.
         Valid keys: ``"rgb"``, ``"depth"``, ``"segmentation"``, ``"normal"``.
     pre_aug:
-        ``(H, W)`` target shape for each frame (applied via ``np.resize``).
+        ``(H, W)`` target shape for each frame (``cv2.resize`` with ``INTER_AREA``).
     size:
         Number of consecutive frames to stack.
     """
@@ -138,10 +139,19 @@ class PixelStack:
             self._reset()
 
         raw = dict(zip(self._CHANNELS, obs))
+        h, w = self._pre_aug
         for k in self._dtype:
-            img = np.resize(raw[k], (3, *self._pre_aug))
+            # spec pipeline-pixels: redimensiona a imagem inteira (o np.resize só copiava os primeiros 3·H·W valores,
+            # ~0,8% de uma câmera 1280×720) e passa de (H, W, 3) para (3, H, W)
+            img = np.asarray(raw[k])
+            if img.ndim == 2:
+                img = np.repeat(img[..., None], 3, axis=-1)
+            img = cv2.resize(img[..., :3].astype(np.float32), (w, h), interpolation=cv2.INTER_AREA)
+            img = img.transpose(2, 0, 1)
             if k in ("rgb", "segmentation"):
-                img = img.astype(np.uint8)
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            else:
+                img = np.ascontiguousarray(img, dtype=np.float32)
             self._stack[k].append(img)
             if len(self._stack[k]) == 1:
                 self._stack[k] = deque(list(self._stack[k]) * self._size, maxlen=self._size)
