@@ -387,9 +387,11 @@ gym.register(
 # Goto do Hydrone no dique inundado (spec hydrone-goto-dique): cmd_vel_yaw com ação [frente, guinada, vertical] em
 # [-1, 1], recompensa do Dranaju; cenário em config/goto_dique.json ("pilares" = 4 pilares; "dique" = dique inteiro).
 # ---------------------------------------------------------------------------
+# -v1: RGB + profundidade embarcadas (Dranaju); -v2: LiDAR no ar e sonar na água (Ricardo) — spec sensores-goto.
 for _cena, _nome in (('pilares', 'Pilares'), ('dique', 'Dique')):
-    gym.register(
-        id=f"HydroneGoto{_nome}-v0",
-        entry_point="core.goto:GotoEnv",
-        kwargs={'seed': 42, 'agent_type': 'Hydrone', 'control_abstraction': 'cmd_vel_yaw', 'cenario': _cena},
-    )
+    for _versao, _classe in (('v0', 'GotoEnv'), ('v1', 'GotoPixelEnv'), ('v2', 'GotoRangeEnv')):
+        gym.register(
+            id=f"HydroneGoto{_nome}-{_versao}",
+            entry_point=f"core.goto:{_classe}",
+            kwargs={'seed': 42, 'agent_type': 'Hydrone', 'control_abstraction': 'cmd_vel_yaw', 'cenario': _cena},
+        )

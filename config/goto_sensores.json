@@ -1,0 +1,21 @@
+{
+  "_comentario": "Spec sensores-goto. v1 = Dranaju (Depth-CUPRL): RGB + profundidade embarcadas, para a frente. v2 = Ricardo (arXiv 2209.06332): LiDAR horizontal (20 leituras de 160 lasers) no ar e sonar frontal 90 x 15 graus (20 feixes) na água. Sem socket: o Hydrone não documenta sockets de câmera/sonar.",
+  "v1": [
+    {"sensor_name": "RGBCamera", "sensor_type": "RGBCamera",
+     "configuration": {"CaptureWidth": 256, "CaptureHeight": 256},
+     "location": [0.35, 0.0, 0.05], "rotation": [0, 0, 0]},
+    {"sensor_name": "DepthCamera", "sensor_type": "DepthCamera",
+     "configuration": {"CaptureWidth": 256, "CaptureHeight": 256, "Debug": true},
+     "location": [0.35, 0.0, 0.05], "rotation": [0, 0, 0]}
+  ],
+  "v2": [
+    {"sensor_name": "Lidar", "sensor_type": "RangeFinderSensor", "socket": "IMUSocket",
+     "configuration": {"LaserMaxDistance": 10, "LaserCount": 160, "LaserAngle": 0, "LaserDebug": false}},
+    {"sensor_name": "Sonar", "sensor_type": "ProfilingSonar",
+     "configuration": {"Azimuth": 90, "Elevation": 15, "RangeMin": 0.5, "RangeMax": 20, "RangeBins": 100,
+                       "AzimuthBins": 20, "AddSigma": 0.15, "MultSigma": 0.2, "MultiPath": false,
+                       "ScaleNoise": true, "AzimuthStreaks": 0, "RangeSigma": 0.1, "ShowWarning": false,
+                       "InitOctreeRange": 20},
+     "location": [0.25, 0.0, -0.05], "rotation": [0, 0, 0]}
+  ]
+}

@@ -14,7 +14,7 @@ import numpy as np
 from gymnasium import spaces
 from numpy.typing import NDArray
 
-from .environments import CONFIG, HoverEnv
+from .environments import CONFIG, HoverEnv, _PixelObsMixin
 
 
 def _wrap(ang: float) -> float:
@@ -28,6 +28,12 @@ def carregar_cenario(nome: str) -> dict:
     if nome not in cenarios:
         raise ValueError(f"cenário desconhecido: {nome!r} (use {sorted(cenarios)})")
     return cenarios[nome]
+
+
+def carregar_sensores(versao: str) -> list:
+    """Sensores do Goto (``v1`` ou ``v2``) de ``config/goto_sensores.json`` (spec sensores-goto)."""
+    with open(f"{CONFIG}/goto_sensores.json") as f:
+        return json.load(f)[versao]
 
 
 def recompensa_dranaju(d_ant: float, d: float, z_rel: float, colisao: bool, chegou: bool) -> float:
@@ -75,6 +81,7 @@ class GotoEnv(HoverEnv):
     MAX_PASSOS = 1000                    # Depth-CUPRL: episódios de 1000 passos
 
     N_ACOES = 3
+    _COM_ACOES = True                    # ações anteriores na observação (o -v1 tem só a pose de 9, como o CUPRL espera)
 
     def __init__(
         self,
@@ -131,7 +138,7 @@ class GotoEnv(HoverEnv):
         return env_params, obs_params
 
     def _obs_dim(self) -> int:
-        return 9 + self.N_ACOES
+        return 9 + (self.N_ACOES if self._COM_ACOES else 0)
 
     def _init_spaces(self) -> None:
         self.observation_space = spaces.Box(-np.inf, np.inf, (self._obs_dim(),), np.float32)
@@ -246,6 +253,8 @@ class GotoEnv(HoverEnv):
         raw = state.get('CameraView')
         if raw is not None:
             self._last_render_frame = np.asarray(raw, dtype=np.uint8)[:, :, 0:3]
+        if not self._COM_ACOES:
+            return self._pose9()
         return np.concatenate([self._pose9(), self._acao_ant]).astype(np.float32)
 
     def _novo_alvo(self) -> None:
@@ -294,3 +303,82 @@ class GotoEnv(HoverEnv):
                 "reward_terms": {"distancia": float(self.GANHO_DIST * (d_ant - d)), "chegou": float(chegou),
                                  "z_rel": z_rel, "total": reward}}
         return self._wrap_state(state), reward, terminated, truncated, info
+
+
+# ---------------------------------------------------------------------------
+# Sensores (spec sensores-goto)
+# ---------------------------------------------------------------------------
+
+class GotoPixelEnv(_PixelObsMixin, GotoEnv):
+    """``-v1`` (Dranaju): RGB e profundidade embarcadas, 3 quadros de 100×100, e ``state`` = pose de 9 valores."""
+
+    _COM_ACOES = False
+    _pixel_channels = ['rgb', 'depth']
+
+    def __init__(self, seed: int, frame_stack: int = 3, frame_size: tuple = (100, 100),
+                 render_channel: str | None = None, **kwargs) -> None:
+        self._render_channel = render_channel
+        super().__init__(seed, **kwargs)
+        self._setup_pixel(frame_stack, frame_size, True, render_channel)
+
+    def _build_params(self):
+        # pula o _build_params do mixin (que usaria as câmeras do pixels.json, em terceira pessoa)
+        env_params, obs_params = GotoEnv._build_params(self)
+        _id = self._agent_id(env_params, 'robot')
+        env_params['agents'][_id]['sensors'].extend(carregar_sensores('v1'))
+        return env_params, obs_params
+
+
+class GotoRangeEnv(GotoEnv):
+    """``-v2`` (Ricardo): 20 distâncias do LiDAR no ar ou do sonar na água + 3 ações anteriores + [d, heading, heading_z]."""
+
+    N_LEITURAS = 20
+    LIDAR_MAX = 10.0
+    LIDAR_N = 160                                                   # 2,25° entre lasers
+    LIDAR_IDX = [(3 + 6 * j) % 160 for j in range(-10, 10)]         # ±6,75° … ±128,25°, a cada 13,5°
+    SONAR_MIN, SONAR_MAX = 0.5, 20.0
+    SONAR_LIMIAR = 1e-3                                             # intensidade abaixo disso = sem retorno
+
+    def _build_params(self):
+        env_params, obs_params = super()._build_params()
+        _id = self._agent_id(env_params, 'robot')
+        env_params['agents'][_id]['sensors'].extend(carregar_sensores('v2'))
+        return env_params, obs_params
+
+    def _obs_dim(self) -> int:
+        return self.N_LEITURAS + self.N_ACOES + 3
+
+    @staticmethod
+    def _validas(d, maximo) -> NDArray:
+        d = np.asarray(d, dtype=np.float32).ravel()
+        return np.where(np.isfinite(d) & (d > 0.0), np.minimum(d, maximo), maximo).astype(np.float32)
+
+    def _lidar20(self, raw) -> NDArray:
+        if raw is None:
+            return np.full(self.N_LEITURAS, self.LIDAR_MAX, dtype=np.float32)
+        d = self._validas(raw, self.LIDAR_MAX)
+        if d.size != self.LIDAR_N:
+            raise ValueError(f"LiDAR com {d.size} lasers; esperado {self.LIDAR_N} (goto_sensores.json)")
+        return d[self.LIDAR_IDX]
+
+    def _sonar20(self, raw) -> NDArray:
+        """Por feixe, a distância do bin de maior intensidade; feixe sem retorno → alcance máximo."""
+        if isinstance(raw, dict):
+            raw = raw.get('raw')
+        if raw is None:
+            return np.full(self.N_LEITURAS, self.SONAR_MAX, dtype=np.float32)
+        img = np.nan_to_num(np.asarray(raw, dtype=np.float32), nan=0.0)   # (RangeBins, AzimuthBins)
+        n_bins = img.shape[0]
+        idx = np.argmax(img, axis=0)
+        d = self.SONAR_MIN + (idx + 0.5) * (self.SONAR_MAX - self.SONAR_MIN) / n_bins
+        d = np.where(img.max(axis=0) > self.SONAR_LIMIAR, d, self.SONAR_MAX)
+        return self._validas(d, self.SONAR_MAX)
+
+    def _wrap_state(self, state: dict) -> NDArray:
+        pose = self._pose9()
+        no_ar = float(self._dynamics[8]) >= float(self._cena['nivel_agua'])
+        dist = self._lidar20(state.get('Lidar')) if no_ar else self._sonar20(state.get('Sonar'))
+        raw = state.get('CameraView')
+        if raw is not None:
+            self._last_render_frame = np.asarray(raw, dtype=np.uint8)[:, :, 0:3]
+        return np.concatenate([dist, self._acao_ant, [pose[2], pose[0], pose[1]]]).astype(np.float32)
