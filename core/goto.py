@@ -67,9 +67,11 @@ class GotoEnv(HoverEnv):
     VZ_MAX = 0.3
     TICKS_POR_S = 20                     # state.json: ticks_per_sec
     YAW_DESVIO_MAX = math.radians(45.0)  # desvio máximo enviado ao cmd_vel_yaw
-    # O motor do BiguaSim 1.1.0 não aplica a aceleração angular ao Hydrone (spec rotacao-hydrone); a integração angular é
-    # feita aqui e a velocidade angular é imposta a cada tick. O motor amortece a ω imposta a ~1 s⁻¹ (0,524 → 0,498 rad/s
-    # em um tick de 0,05 s, tools/diag_rotacao_hydrone.py).
+    # O motor do BiguaSim 1.1.0 não aplica a aceleração angular ao Hydrone e descarta acelerações lineares pequenas (spec
+    # rotacao-hydrone); a integração das acelerações da dinâmica é feita aqui e a velocidade (linear e angular) é imposta a
+    # cada tick. O motor amortece v e ω impostas a ~1 s⁻¹ (0,3 → 0,285 m/s e 0,524 → 0,498 rad/s em um tick de 0,05 s,
+    # tools/diag_rotacao_hydrone.py).
+    AMORTECIMENTO_LINEAR_MOTOR = 1.0
     AMORTECIMENTO_ANGULAR_MOTOR = 1.0
 
     # Recompensa e término do Dranaju (setReward/getState)
@@ -104,12 +106,12 @@ class GotoEnv(HoverEnv):
         cenario: str = 'pilares',
         reward_version: str = "v1",
         env_version: str = "v2",
-        integrar_rotacao: bool = True,
+        integrar_dinamica: bool = True,
     ) -> None:
-        if integrar_rotacao and batch_size != 1:
-            raise ValueError("integrar_rotacao só funciona com batch_size = 1")
-        self._integrar_rotacao = integrar_rotacao
-        self._w_dot = np.zeros(3)
+        if integrar_dinamica and batch_size != 1:
+            raise ValueError("integrar_dinamica só funciona com batch_size = 1")
+        self._integrar_dinamica = integrar_dinamica
+        self._acc = np.zeros(6)
         self._cena = carregar_cenario(cenario)
         self._cenario = cenario
         if self._cena.get('provisorio'):
@@ -226,10 +228,10 @@ class GotoEnv(HoverEnv):
         return np.array([v * math.cos(psi), v * math.sin(psi), vz, math.degrees(desvio)], dtype=np.float32)
 
     # ------------------------------------------------------------------
-    # Integração angular (spec rotacao-hydrone)
+    # Integração da dinâmica (spec rotacao-hydrone)
     # ------------------------------------------------------------------
     def _instalar_integrador(self) -> None:
-        """Envolve o step da dinâmica do BiguaSim: guarda ω̇ e manda ao motor só a aceleração linear."""
+        """Envolve o step da dinâmica do BiguaSim: guarda [v̇, ω̇] (mundo) e manda aceleração zero ao motor."""
         modelo = self._env._dynamics_dict['robot']
         if getattr(modelo, '_step_original', None) is None:
             modelo._step_original = modelo.step
@@ -237,27 +239,27 @@ class GotoEnv(HoverEnv):
 
         def step(*a, **k):
             acc = np.asarray(original(*a, **k), dtype=np.float64).reshape(-1, 6)
-            self._w_dot = acc[0, 3:6].copy()
-            acc[:, 3:6] = 0.0
-            return acc.tolist()
+            self._acc = acc[0].copy()
+            return np.zeros_like(acc).tolist()
 
         modelo.step = step
 
-    def _impor_rotacao(self, state: dict) -> None:
-        """Impõe ω + ω̇·dt (mundo) para o próximo tick, mantendo posição, atitude e velocidade linear."""
+    def _impor_estado(self, state: dict) -> None:
+        """Impõe v + v̇·dt e ω + ω̇·dt (mundo) para o próximo tick, mantendo a posição e a atitude do motor."""
         dt = 1.0 / self.TICKS_POR_S
-        w = np.asarray(state['DynamicsSensor'], dtype=np.float64).ravel()[12:15]
-        rpy = np.asarray(state['RPYDynamicsSensor'], dtype=np.float64).ravel()
-        w_novo = (w + self._w_dot * dt) * math.exp(self.AMORTECIMENTO_ANGULAR_MOTOR * dt)
-        self._env.agents['robot-id0'].set_physics_state(rpy[6:9], rpy[15:18], rpy[3:6], np.degrees(w_novo))
+        din = np.asarray(state['DynamicsSensor'], dtype=np.float64).ravel()      # v e ω que a dinâmica lê
+        rpy = np.asarray(state['RPYDynamicsSensor'], dtype=np.float64).ravel()   # posição do ator e atitude em graus
+        v_novo = (din[3:6] + self._acc[:3] * dt) * math.exp(self.AMORTECIMENTO_LINEAR_MOTOR * dt)
+        w_novo = (din[12:15] + self._acc[3:] * dt) * math.exp(self.AMORTECIMENTO_ANGULAR_MOTOR * dt)
+        self._env.agents['robot-id0'].set_physics_state(rpy[6:9], rpy[15:18], v_novo, np.degrees(w_novo))
 
     def _passo_sim(self, action_arg) -> dict:
-        """Avança ``action_repeat`` ticks; com a integração ligada, um tick por vez, impondo ω depois de cada um."""
-        if not self._integrar_rotacao:
+        """Avança ``action_repeat`` ticks; com a integração ligada, um tick por vez, impondo v e ω depois de cada um."""
+        if not self._integrar_dinamica:
             return self._env.step(action_arg, action_repeat=self._action_repeat)
         for _ in range(self._action_repeat):
             raw = self._env.step(action_arg, action_repeat=1)
-            self._impor_rotacao(self._unwrap_state(raw))
+            self._impor_estado(self._unwrap_state(raw))
         return raw
 
     # ------------------------------------------------------------------
@@ -308,8 +310,8 @@ class GotoEnv(HoverEnv):
 
     def _reset(self):
         state = self._unwrap_state(self._env.reset())
-        self._w_dot = np.zeros(3)
-        if self._integrar_rotacao:
+        self._acc = np.zeros(6)
+        if self._integrar_dinamica:
             self._instalar_integrador()
         self._spawn_pilares()
         self._set_dynamics(state)
