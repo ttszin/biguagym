@@ -171,6 +171,10 @@ class GotoEnv(HoverEnv):
     PASSO_ESPERA = 2.5                   # m entre os níveis à espera (torpedo de 2,1 m em pé)
     TOL_POSICAO = 0.3                    # m: diferença para o ponto imposto além da comum aos outros torpedos
     TENTATIVAS_POSICAO = 3
+    # o set_physics_state varre o caminho e para no primeiro obstáculo, e os clones nascem sobrepostos no mesmo ponto: no
+    # lab, 35 de 48 ficaram presos (2026-11-18). No posicionamento os torpedos andam com teleport (comando de outro tipo);
+    # depois são segurados com set_physics_state (zera a velocidade)
+    POSICIONAR_COM_TELEPORTE = True
     # cada sensor e buffer de cada agente é um arquivo em /dev/shm: com 66 torpedos o limite padrão de 1024 arquivos abertos
     # estourou no lab (OSError 24, 2026-11-18)
     LIMITE_ARQUIVOS = 65536
@@ -395,16 +399,20 @@ class GotoEnv(HoverEnv):
             state = {k: (v[0] if isinstance(v, list) and len(v) == 1 else v) for k, v in state['robot'].items()}
         return HoverEnv._unwrap_state(state)
 
-    def _segurar_obstaculos(self) -> None:
-        """Reimpõe posição e atitude de cada torpedo (parados em accel ainda derivam ~0,7 m em 5 s)."""
+    def _segurar_obstaculos(self, teleporte: bool = False) -> None:
+        """Reimpõe posição e atitude de cada torpedo (parados em accel ainda derivam ~0,7 m em 5 s); com ``teleporte``,
+        usa o teleport do agente (no tick vale só o último comando dado a cada agente)."""
         zero = [0.0, 0.0, 0.0]
         for j in range(self._n_obstaculos()):
-            self._env.agents[f'{self.NOME_OBSTACULO}-id{j}'].set_physics_state(
-                self._obst_ponto[j], self._geo['rotacao'][j], zero, zero)
+            agente = self._env.agents[f'{self.NOME_OBSTACULO}-id{j}']
+            if teleporte:
+                agente.teleport(self._obst_ponto[j], self._geo['rotacao'][j])
+            else:
+                agente.set_physics_state(self._obst_ponto[j], self._geo['rotacao'][j], zero, zero)
 
-    def _tick_obstaculos(self) -> dict:
+    def _tick_obstaculos(self, teleporte: bool = False) -> dict:
         """Um tick com o robô parado (cmd_vel_yaw zero), segurando os obstáculos onde estão marcados."""
-        self._segurar_obstaculos()
+        self._segurar_obstaculos(teleporte)
         return self._env.step(self._cmds([0.0] * 4), action_repeat=1)
 
     def _pontos_espera(self) -> NDArray:
@@ -460,13 +468,14 @@ class GotoEnv(HoverEnv):
         raw = None
         todos = np.arange(n)
         for tentativa in range(self.TENTATIVAS_POSICAO + 1):
+            tele = self.POSICIONAR_COM_TELEPORTE
             self._obst_ponto[todos] = espera[todos]
-            raw = self._tick_obstaculos()
+            raw = self._tick_obstaculos(tele)
             for k in np.unique(nivel[todos]):
                 sel = todos[nivel[todos] == k]
                 self._obst_ponto[sel] = self._geo['imposto'][sel]
-                raw = self._tick_obstaculos()
-            raw = self._tick_obstaculos()                    # mede com todos no lugar
+                raw = self._tick_obstaculos(tele)
+            raw = self._tick_obstaculos()                    # zera a velocidade e mede com todos no lugar
             self._unwrap_state(raw)
             todos = self._fora_do_lugar()
             if not len(todos):
