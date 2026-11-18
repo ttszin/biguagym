@@ -73,6 +73,10 @@ class GotoEnv(HoverEnv):
     # tools/diag_rotacao_hydrone.py).
     AMORTECIMENTO_LINEAR_MOTOR = 1.0
     AMORTECIMENTO_ANGULAR_MOTOR = 1.0
+    # Parado, o corpo "dorme" no motor: velocidades impostas pequenas não o acordam e ele mede v = ω = 0 (0,05 m/s em um
+    # tick acorda, 0,01 não). Abaixo destes limiares, com o motor medindo zero, o integrador segue com a própria v e ω.
+    VEL_DORMINDO = 0.1       # m/s
+    VEL_ANG_DORMINDO = 0.1   # rad/s
 
     # Recompensa e término do Dranaju (setReward/getState)
     GANHO_DIST = 0.1
@@ -112,6 +116,7 @@ class GotoEnv(HoverEnv):
             raise ValueError("integrar_dinamica só funciona com batch_size = 1")
         self._integrar_dinamica = integrar_dinamica
         self._acc = np.zeros(6)
+        self._v, self._w = np.zeros(3), np.zeros(3)
         self._cena = carregar_cenario(cenario)
         self._cenario = cenario
         if self._cena.get('provisorio'):
@@ -231,26 +236,40 @@ class GotoEnv(HoverEnv):
     # Integração da dinâmica (spec rotacao-hydrone)
     # ------------------------------------------------------------------
     def _instalar_integrador(self) -> None:
-        """Envolve o step da dinâmica do BiguaSim: guarda [v̇, ω̇] (mundo) e manda aceleração zero ao motor."""
+        """Envolve o step da dinâmica do BiguaSim: entrega a ela o v/ω do integrador, guarda [v̇, ω̇] (mundo) e manda
+        aceleração zero ao motor."""
         modelo = self._env._dynamics_dict['robot']
         if getattr(modelo, '_step_original', None) is None:
             modelo._step_original = modelo.step
         original = modelo._step_original
 
-        def step(*a, **k):
-            acc = np.asarray(original(*a, **k), dtype=np.float64).reshape(-1, 6)
+        def step(estados, *a, **k):
+            din = np.array(estados[0], copy=True).ravel()   # cópia: o estado do motor (e a observação) não muda
+            din[3:6], din[12:15] = self._conciliar(din[3:6], din[12:15])
+            acc = np.asarray(original([din], *a, **k), dtype=np.float64).reshape(-1, 6)
             self._acc = acc[0].copy()
             return np.zeros_like(acc).tolist()
 
         modelo.step = step
 
+    def _conciliar(self, v_med, w_med):
+        """v e ω (mundo) deste tick: os medidos pelo motor, salvo com o corpo dormindo (o motor mede zero e o integrador
+        ainda não passou do limiar em que ele acorda); aí seguem os integrados, para a velocidade acumular a partir do
+        repouso."""
+        dormindo = (np.allclose(v_med, 0.0, atol=1e-4) and np.allclose(w_med, 0.0, atol=1e-4)
+                    and np.linalg.norm(self._v) < self.VEL_DORMINDO and np.linalg.norm(self._w) < self.VEL_ANG_DORMINDO)
+        if not dormindo:
+            self._v, self._w = np.array(v_med, dtype=np.float64), np.array(w_med, dtype=np.float64)
+        return self._v, self._w
+
     def _impor_estado(self, state: dict) -> None:
         """Impõe v + v̇·dt e ω + ω̇·dt (mundo) para o próximo tick, mantendo a posição e a atitude do motor."""
         dt = 1.0 / self.TICKS_POR_S
-        din = np.asarray(state['DynamicsSensor'], dtype=np.float64).ravel()      # v e ω que a dinâmica lê
         rpy = np.asarray(state['RPYDynamicsSensor'], dtype=np.float64).ravel()   # posição do ator e atitude em graus
-        v_novo = (din[3:6] + self._acc[:3] * dt) * math.exp(self.AMORTECIMENTO_LINEAR_MOTOR * dt)
-        w_novo = (din[12:15] + self._acc[3:] * dt) * math.exp(self.AMORTECIMENTO_ANGULAR_MOTOR * dt)
+        self._v = self._v + self._acc[:3] * dt                                   # leitura esperada no próximo tick
+        self._w = self._w + self._acc[3:] * dt
+        v_novo = self._v * math.exp(self.AMORTECIMENTO_LINEAR_MOTOR * dt)
+        w_novo = self._w * math.exp(self.AMORTECIMENTO_ANGULAR_MOTOR * dt)
         self._env.agents['robot-id0'].set_physics_state(rpy[6:9], rpy[15:18], v_novo, np.degrees(w_novo))
 
     def _passo_sim(self, action_arg) -> dict:
@@ -311,6 +330,7 @@ class GotoEnv(HoverEnv):
     def _reset(self):
         state = self._unwrap_state(self._env.reset())
         self._acc = np.zeros(6)
+        self._v, self._w = np.zeros(3), np.zeros(3)
         if self._integrar_dinamica:
             self._instalar_integrador()
         self._spawn_pilares()
