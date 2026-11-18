@@ -2,8 +2,12 @@
 
 Tarefa dos trabalhos do Dranaju (Depth-CUPRL, arXiv 2206.15211) e do Ricardo Grando: ir até alvos aleatórios no ar e na
 água, comandando velocidade para a frente, velocidade de guinada e velocidade vertical. Ação, recompensa e término seguem
-o código do Dranaju (``dranaju/curl_navigation``, ``environment_hydrone_image_depth.py``). O cenário (área, pilares,
+o código do Dranaju (``dranaju/curl_navigation``, ``environment_hydrone_image_depth.py``). O cenário (área, obstáculos,
 caixas de exclusão, faixas dos alvos) vem de ``config/goto_dique.json``.
+
+Obstáculos: o mundo SkyDive não cria objetos (``SpawnProp`` recusado pelo motor), então pilares e vigas são feitos de
+agentes (``agente_obstaculo``, TorpedoAUV) em lote, parados em ``accel`` com aceleração zero e com a posição reimposta a cada
+tick (sem isso derivam e, encostados, são arremessados).
 """
 import json
 import math
@@ -28,6 +32,75 @@ def carregar_cenario(nome: str) -> dict:
     if nome not in cenarios:
         raise ValueError(f"cenário desconhecido: {nome!r} (use {sorted(cenarios)})")
     return cenarios[nome]
+
+
+def carregar_agente_obstaculo() -> dict:
+    """Tipo e medidas do agente de que os obstáculos são feitos (``agente_obstaculo`` de ``config/goto_dique.json``)."""
+    with open(f"{CONFIG}/goto_dique.json") as f:
+        return json.load(f)['agente_obstaculo']
+
+
+def geometria_obstaculos(cena: dict, agente: dict) -> dict:
+    """Torpedos dos obstáculos do cenário: centro geométrico (z absoluto), eixo (unitário, do nariz), rotação do ator
+    [roll, pitch, yaw] em graus, ponto imposto ao ator (centro + origem_eixo·eixo), tipo e índice do obstáculo.
+
+    pilar: feixe n × n em pé (pitch 90°), ``niveis`` empilhados a partir de ``base_z`` com ``folga`` entre eles;
+    viga: torpedos deitados em fila de ``de`` até ``ate`` (mesmo z), quantos couberem, centrados.
+    """
+    agua = float(cena['nivel_agua'])
+    comp, diam = float(agente['comprimento']), float(agente['diametro'])
+    folga, folga_feixe = float(agente['folga']), float(agente['folga_feixe'])
+    centros, eixos, rots, tipos, idx = [], [], [], [], []
+    for i, ob in enumerate(cena.get('obstaculos', [])):
+        if ob['tipo'] == 'pilar':
+            n = int(ob.get('feixe', 1))
+            passo = diam + folga_feixe
+            desloc = [(k - (n - 1) / 2.0) * passo for k in range(n)]
+            for nivel in range(int(ob['niveis'])):
+                z = agua + float(ob['base_z']) + nivel * (comp + folga) + comp / 2.0
+                for dx in desloc:
+                    for dy in desloc:
+                        centros.append([float(ob['xy'][0]) + dx, float(ob['xy'][1]) + dy, z])
+                        eixos.append([0.0, 0.0, 1.0])
+                        rots.append([0.0, 90.0, 0.0])
+                        tipos.append('pilar')
+                        idx.append(i)
+        elif ob['tipo'] == 'viga':
+            de, ate = np.asarray(ob['de'], dtype=np.float64), np.asarray(ob['ate'], dtype=np.float64)
+            if not math.isclose(de[2], ate[2]):
+                raise ValueError(f"viga {i} inclinada (de {de.tolist()}, até {ate.tolist()}); use o mesmo z")
+            d = ate - de
+            tam = float(np.linalg.norm(d))
+            u = d / tam
+            n = max(1, math.ceil((tam + folga) / (comp + folga)))
+            meio = (de + ate) / 2.0 + [0.0, 0.0, agua]
+            yaw = math.degrees(math.atan2(u[1], u[0]))
+            for k in range(n):
+                centros.append((meio + (k - (n - 1) / 2.0) * (comp + folga) * u).tolist())
+                eixos.append(u.tolist())
+                rots.append([0.0, 0.0, yaw])
+                tipos.append('viga')
+                idx.append(i)
+        else:
+            raise ValueError(f"obstáculo {i} de tipo desconhecido: {ob['tipo']!r} (use 'pilar' ou 'viga')")
+    centros = np.asarray(centros, dtype=np.float64).reshape(-1, 3)
+    eixos = np.asarray(eixos, dtype=np.float64).reshape(-1, 3)
+    return {'centro': centros, 'eixo': eixos, 'rotacao': np.asarray(rots, dtype=np.float64).reshape(-1, 3),
+            'imposto': centros + float(agente.get('origem_eixo', 0.0)) * eixos,
+            'tipo': tipos, 'obstaculo': np.asarray(idx, dtype=int),
+            'meio_comprimento': max(comp / 2.0 - diam / 2.0, 0.0), 'raio': diam / 2.0}
+
+
+def dist_capsulas(pos, geo: dict):
+    """Menor distância de ``pos`` à superfície dos torpedos (cápsulas) e o índice do torpedo (inf e -1 sem torpedos)."""
+    c = geo['centro']
+    if len(c) == 0:
+        return math.inf, -1
+    rel = np.asarray(pos, dtype=np.float64)[None, :] - c
+    t = np.clip(np.einsum('ij,ij->i', rel, geo['eixo']), -geo['meio_comprimento'], geo['meio_comprimento'])
+    d = np.linalg.norm(rel - t[:, None] * geo['eixo'], axis=1) - geo['raio']
+    j = int(np.argmin(d))
+    return float(d[j]), j
 
 
 def carregar_sensores(versao: str) -> list:
@@ -90,6 +163,14 @@ class GotoEnv(HoverEnv):
     DIST_COLISAO = 0.625
     MAX_PASSOS = 1000                    # Depth-CUPRL: episódios de 1000 passos
 
+    # Obstáculos feitos de agentes: esperam no alto acima do lugar (níveis em alturas diferentes) e descem na vertical, um
+    # nível por tick (o teleporte do motor varre o caminho e para no primeiro obstáculo)
+    NOME_OBSTACULO = 'obstaculo'
+    ALTURA_ESPERA = 30.0                 # m acima da água
+    PASSO_ESPERA = 2.5                   # m entre os níveis à espera (torpedo de 2,1 m em pé)
+    TOL_POSICAO = 0.3                    # m: diferença para o ponto imposto além da comum aos outros torpedos
+    TENTATIVAS_POSICAO = 3
+
     N_ACOES = 3
     _COM_ACOES = True                    # ações anteriores na observação (o -v1 tem só a pose de 9, como o CUPRL espera)
 
@@ -117,8 +198,7 @@ class GotoEnv(HoverEnv):
         self._integrar_dinamica = integrar_dinamica
         self._acc = np.zeros(6)
         self._v, self._w = np.zeros(3), np.zeros(3)
-        self._cena = carregar_cenario(cenario)
-        self._cenario = cenario
+        self._preparar_cenario(cenario)
         if self._cena.get('provisorio'):
             warnings.warn(f"cenário {cenario!r} do Goto com coordenadas provisórias (config/goto_dique.json)")
         self._validar_spawn()
@@ -137,6 +217,15 @@ class GotoEnv(HoverEnv):
     def max_episode_steps(self) -> int:
         return self.MAX_PASSOS
 
+    def _preparar_cenario(self, cenario: str) -> None:
+        """Lê o cenário e monta a geometria dos obstáculos (torpedos)."""
+        self._cena = carregar_cenario(cenario)
+        self._cenario = cenario
+        self._agente_obst = carregar_agente_obstaculo()
+        self._geo = geometria_obstaculos(self._cena, self._agente_obst)
+        self._obst_ponto = self._geo['imposto'].copy()   # onde cada torpedo é mantido (ponto de espera ou lugar final)
+        self._estado_obst = None
+
     # ------------------------------------------------------------------
     # Construção
     # ------------------------------------------------------------------
@@ -151,7 +240,22 @@ class GotoEnv(HoverEnv):
         (x0, y0), (x1, y1) = self._cena['area']
         z0, z1 = self._cena['z_limites']
         self._bounds = np.array([[x0, y0, agua + z0], [x1, y1, agua + z1]], dtype=np.float64)
+        n = self._n_obstaculos()
+        if n:
+            # os clones nascem todos no mesmo ponto, alto, e são levados ao lugar no reset (_posicionar_obstaculos)
+            dinamica = {'sensor_type': 'DynamicsSensor', 'socket': 'IMUSocket',
+                        'configuration': {'UseCOM': True, 'UseRPY': False}, 'location': [0, 0, 0], 'rotation': [0, 0, 0]}
+            rpy = dict(dinamica, sensor_name='RPYDynamicsSensor', configuration={'UseCOM': False, 'UseRPY': True})
+            spawn = self._cena['spawn']
+            env_params['agents'].append({
+                'agent_name': self.NOME_OBSTACULO, 'agent_type': self._agente_obst['tipo'],
+                'control_abstraction': 'accel', 'dynamics': {'batch_size': n, 'water_level': agua},
+                'location': [float(spawn[0]), float(spawn[1]), agua + self.ALTURA_ESPERA],
+                'rotation': [0.0, 90.0, 0.0], 'sensors': [dinamica, rpy]})
         return env_params, obs_params
+
+    def _n_obstaculos(self) -> int:
+        return len(self._geo['centro'])
 
     def _obs_dim(self) -> int:
         return 9 + (self.N_ACOES if self._COM_ACOES else 0)
@@ -163,25 +267,10 @@ class GotoEnv(HoverEnv):
     # ------------------------------------------------------------------
     # Cenário: pilares e alvos
     # ------------------------------------------------------------------
-    def _spawn_pilares(self) -> None:
-        """Recria os pilares (o reset do simulador remove os objetos criados com spawn_prop)."""
-        agua = float(self._cena['nivel_agua'])
-        for i, p in enumerate(self._cena['pilares']):
-            r, h = float(p['raio']), float(p['altura'])
-            centro_z = agua + float(p['base_z']) + h / 2.0
-            self._env.spawn_prop('cylinder', location=[float(p['xy'][0]), float(p['xy'][1]), centro_z],
-                                 rotation=[0.0, 0.0, 0.0], scale=[2 * r, 2 * r, h],
-                                 material='steel', tag='Pilar', name=f'pilar{i}')
-
-    def _dist_pilar(self, pos) -> float:
-        """Menor distância horizontal até a superfície de um pilar cuja altura cobre pos[2] (inf se nenhum)."""
-        agua = float(self._cena['nivel_agua'])
-        dmin = math.inf
-        for p in self._cena['pilares']:
-            base = agua + float(p['base_z'])
-            if base <= pos[2] <= base + float(p['altura']):
-                dmin = min(dmin, math.hypot(pos[0] - p['xy'][0], pos[1] - p['xy'][1]) - float(p['raio']))
-        return dmin
+    def _dist_obstaculo(self, pos):
+        """Menor distância até a superfície de um torpedo dos obstáculos e o tipo ('pilar'/'viga'; inf e None se não há)."""
+        d, j = dist_capsulas(pos, self._geo)
+        return d, (self._geo['tipo'][j] if j >= 0 else None)
 
     def _dist_exclusao(self, pos) -> float:
         """Menor distância até uma caixa de exclusão (0 dentro dela; inf se não há caixas)."""
@@ -195,8 +284,8 @@ class GotoEnv(HoverEnv):
 
     def _validar_spawn(self) -> None:
         spawn = np.asarray(self._cena['spawn'], dtype=np.float64)
-        if min(self._dist_pilar(spawn), self._dist_exclusao(spawn)) < self.DIST_COLISAO:
-            raise ValueError(f"spawn {spawn.tolist()} a menos de {self.DIST_COLISAO} m de um pilar ou caixa de exclusão "
+        if min(self._dist_obstaculo(spawn)[0], self._dist_exclusao(spawn)) < self.DIST_COLISAO:
+            raise ValueError(f"spawn {spawn.tolist()} a menos de {self.DIST_COLISAO} m de um obstáculo ou caixa de exclusão "
                              f"no cenário {self._cenario!r} (goto_dique.json)")
 
     def _sortear_alvo(self, pos=None) -> NDArray:
@@ -209,7 +298,7 @@ class GotoEnv(HoverEnv):
             y = self.rng.uniform(y0 + folga, y1 - folga)
             faixa = c['alvo_z_agua'] if self.rng.uniform() < float(c['p_alvo_agua']) else c['alvo_z_ar']
             alvo = np.array([x, y, agua + self.rng.uniform(*faixa)], dtype=np.float64)
-            if self._dist_pilar(alvo) < folga or self._dist_exclusao(alvo) < folga:
+            if self._dist_obstaculo(alvo)[0] < folga or self._dist_exclusao(alvo) < folga:
                 continue
             if pos is not None and np.linalg.norm(alvo - np.asarray(pos, dtype=np.float64)) < float(c['dist_min_alvo']):
                 continue
@@ -272,13 +361,103 @@ class GotoEnv(HoverEnv):
         w_novo = self._w * math.exp(self.AMORTECIMENTO_ANGULAR_MOTOR * dt)
         self._env.agents['robot-id0'].set_physics_state(rpy[6:9], rpy[15:18], v_novo, np.degrees(w_novo))
 
+    # ------------------------------------------------------------------
+    # Obstáculos feitos de agentes
+    # ------------------------------------------------------------------
+    def _cmds(self, action_arg):
+        """Comando do step: só o do robô, ou o dicionário robô + aceleração zero a cada torpedo dos obstáculos."""
+        n = self._n_obstaculos()
+        if not n:
+            return action_arg
+        return {'robot': action_arg, self.NOME_OBSTACULO: [[0.0] * 6 for _ in range(n)]}
+
+    def _unwrap_state(self, state: dict) -> dict:
+        """Estado do robô; com os obstáculos, o estado vem por agente ({'robot': ..., 'obstaculo': ...})."""
+        if isinstance(state, dict) and self.NOME_OBSTACULO in state:
+            self._estado_obst = state[self.NOME_OBSTACULO]
+            state = state['robot']
+        return HoverEnv._unwrap_state(state)
+
+    def _segurar_obstaculos(self) -> None:
+        """Reimpõe posição e atitude de cada torpedo (parados em accel ainda derivam ~0,7 m em 5 s)."""
+        zero = [0.0, 0.0, 0.0]
+        for j in range(self._n_obstaculos()):
+            self._env.agents[f'{self.NOME_OBSTACULO}-id{j}'].set_physics_state(
+                self._obst_ponto[j], self._geo['rotacao'][j], zero, zero)
+
+    def _tick_obstaculos(self) -> dict:
+        """Um tick com o robô parado (cmd_vel_yaw zero), segurando os obstáculos onde estão marcados."""
+        self._segurar_obstaculos()
+        return self._env.step(self._cmds([0.0] * 4), action_repeat=1)
+
+    def _pontos_espera(self) -> NDArray:
+        """Ponto de espera de cada torpedo: acima do lugar, um nível por altura (torpedos na mesma vertical não se tocam)."""
+        agua = float(self._cena['nivel_agua'])
+        nivel = self._niveis_descida()
+        espera = self._geo['imposto'].copy()
+        espera[:, 2] = agua + self.ALTURA_ESPERA + self.PASSO_ESPERA * nivel
+        return espera
+
+    def _niveis_descida(self) -> NDArray:
+        """Ordem de descida de cada torpedo: pelo z final, de baixo para cima (quem desce não passa por quem já desceu)."""
+        zs = np.round(self._geo['centro'][:, 2], 3)
+        return np.searchsorted(np.unique(zs), zs)
+
+    def _fora_do_lugar(self) -> NDArray:
+        """Índices dos torpedos fora do lugar: a diferença medida − imposto difere da mediana (o deslocamento constante
+        entre a origem do ator e o ponto imposto) em mais de TOL_POSICAO."""
+        rpy = self._estado_obst.get('RPYDynamicsSensor') if isinstance(self._estado_obst, dict) else None
+        if rpy is None:
+            return np.zeros(0, dtype=int)
+        medido = np.asarray(rpy, dtype=np.float64).reshape(self._n_obstaculos(), -1)[:, 6:9]
+        dif = medido - self._geo['imposto']
+        erro = np.zeros(len(dif))
+        # o deslocamento vai ao longo do eixo do torpedo: comum só entre os de mesma orientação
+        _, grupo = np.unique(np.round(self._geo['eixo'], 3), axis=0, return_inverse=True)
+        for g in np.unique(grupo):
+            sel = grupo.ravel() == g
+            erro[sel] = np.linalg.norm(dif[sel] - np.median(dif[sel], axis=0), axis=1)
+        return np.flatnonzero(erro > self.TOL_POSICAO)
+
+    def _posicionar_obstaculos(self):
+        """Leva os torpedos do ponto de nascimento ao lugar: sobem/vão ao ponto de espera, descem um nível por tick e os
+        que não chegaram repetem subida e descida. Devolve o estado do último tick (None sem obstáculos)."""
+        n = self._n_obstaculos()
+        if not n:
+            return None
+        espera = self._pontos_espera()
+        nivel = self._niveis_descida()
+        raw = None
+        todos = np.arange(n)
+        for tentativa in range(self.TENTATIVAS_POSICAO + 1):
+            self._obst_ponto[todos] = espera[todos]
+            raw = self._tick_obstaculos()
+            for k in np.unique(nivel[todos]):
+                sel = todos[nivel[todos] == k]
+                self._obst_ponto[sel] = self._geo['imposto'][sel]
+                raw = self._tick_obstaculos()
+            raw = self._tick_obstaculos()                    # mede com todos no lugar
+            self._unwrap_state(raw)
+            todos = self._fora_do_lugar()
+            if not len(todos):
+                break
+        else:
+            warnings.warn(f"{len(todos)} torpedo(s) dos obstáculos fora do lugar depois de {self.TENTATIVAS_POSICAO} "
+                          f"tentativas: {todos.tolist()}")
+        self._obst_ponto = self._geo['imposto'].copy()
+        return raw
+
     def _passo_sim(self, action_arg) -> dict:
-        """Avança ``action_repeat`` ticks; com a integração ligada, um tick por vez, impondo v e ω depois de cada um."""
-        if not self._integrar_dinamica:
-            return self._env.step(action_arg, action_repeat=self._action_repeat)
+        """Avança ``action_repeat`` ticks; com a integração ligada ou com obstáculos, um tick por vez (impondo v e ω ao
+        robô depois de cada um e reimpondo os obstáculos antes)."""
+        cmds = self._cmds(action_arg)
+        if not self._integrar_dinamica and not self._n_obstaculos():
+            return self._env.step(cmds, action_repeat=self._action_repeat)
         for _ in range(self._action_repeat):
-            raw = self._env.step(action_arg, action_repeat=1)
-            self._impor_estado(self._unwrap_state(raw))
+            self._segurar_obstaculos()
+            raw = self._env.step(cmds, action_repeat=1)
+            if self._integrar_dinamica:
+                self._impor_estado(self._unwrap_state(raw))
         return raw
 
     # ------------------------------------------------------------------
@@ -295,8 +474,9 @@ class GotoEnv(HoverEnv):
             return "parede"
         if not (lo[2] <= pos[2] <= hi[2]):
             return "altura"
-        if self._dist_pilar(pos) < self.DIST_COLISAO:
-            return "pilar"
+        d, tipo = self._dist_obstaculo(pos)
+        if d < self.DIST_COLISAO:
+            return tipo
         if self._dist_exclusao(pos) < self.DIST_COLISAO:
             return "obstaculo"
         return None
@@ -329,11 +509,13 @@ class GotoEnv(HoverEnv):
 
     def _reset(self):
         state = self._unwrap_state(self._env.reset())
-        self._acc = np.zeros(6)
-        self._v, self._w = np.zeros(3), np.zeros(3)
         if self._integrar_dinamica:
             self._instalar_integrador()
-        self._spawn_pilares()
+        raw = self._posicionar_obstaculos()
+        if raw is not None:
+            state = self._unwrap_state(raw)
+        self._acc = np.zeros(6)
+        self._v, self._w = np.zeros(3), np.zeros(3)
         self._set_dynamics(state)
         self._episode_steps = 0
         self._alvos_atingidos = 0
