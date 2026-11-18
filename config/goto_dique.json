@@ -1,11 +1,11 @@
 {
-  "_comentario": "Spec hydrone-goto-dique. Coordenadas do mundo em metros; z de z_limites, obstáculos e alvos é relativo a nivel_agua. Área conferida no lab em 2026-11-18 (tools/mapear_dique.py): canto noroeste da bacia norte do dique inundado, na frente da proa do navio. Os obstáculos são torpedos (agente_obstaculo) parados: o mundo SkyDive não cria objetos (SpawnProp recusado). pilar: feixe n x n de torpedos em pé, 'niveis' empilhados a partir de base_z; viga: torpedos deitados em fila de 'de' até 'ate' (mesmo z).",
+  "_comentario": "Spec hydrone-goto-dique. Coordenadas do mundo em metros; z de z_limites, obstáculos e alvos é relativo a nivel_agua. Área conferida no lab em 2026-11-18 (tools/mapear_dique.py): canto noroeste da bacia norte do dique inundado, na frente da proa do navio. Os obstáculos são torpedos (agente_obstaculo) parados: o mundo SkyDive não cria objetos (SpawnProp recusado). pilar: feixe n x n de torpedos em pé (eixos a diâmetro + folga_feixe = 0,32 m: as aletas têm ~0,27 m de envergadura), 'niveis' empilhados a partir de base_z; viga: torpedos deitados em fila de 'de' até 'ate' (mesmo z).",
   "agente_obstaculo": {
     "tipo": "TorpedoAUV",
     "comprimento": 2.1,
     "diametro": 0.19,
     "folga": 0.15,
-    "folga_feixe": 0.05,
+    "folga_feixe": 0.13,
     "origem_eixo": 0.0
   },
   "cenarios": {

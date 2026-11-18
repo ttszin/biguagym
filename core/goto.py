@@ -11,6 +11,7 @@ tick (sem isso derivam e, encostados, são arremessados).
 """
 import json
 import math
+import resource
 import warnings
 
 import numpy as np
@@ -170,6 +171,9 @@ class GotoEnv(HoverEnv):
     PASSO_ESPERA = 2.5                   # m entre os níveis à espera (torpedo de 2,1 m em pé)
     TOL_POSICAO = 0.3                    # m: diferença para o ponto imposto além da comum aos outros torpedos
     TENTATIVAS_POSICAO = 3
+    # cada sensor e buffer de cada agente é um arquivo em /dev/shm: com 66 torpedos o limite padrão de 1024 arquivos abertos
+    # estourou no lab (OSError 24, 2026-11-18)
+    LIMITE_ARQUIVOS = 65536
 
     N_ACOES = 3
     _COM_ACOES = True                    # ações anteriores na observação (o -v1 tem só a pose de 9, como o CUPRL espera)
@@ -199,6 +203,8 @@ class GotoEnv(HoverEnv):
         self._acc = np.zeros(6)
         self._v, self._w = np.zeros(3), np.zeros(3)
         self._preparar_cenario(cenario)
+        if self._n_obstaculos():
+            self._subir_limite_arquivos()
         if self._cena.get('provisorio'):
             warnings.warn(f"cenário {cenario!r} do Goto com coordenadas provisórias (config/goto_dique.json)")
         self._validar_spawn()
@@ -242,17 +248,26 @@ class GotoEnv(HoverEnv):
         self._bounds = np.array([[x0, y0, agua + z0], [x1, y1, agua + z1]], dtype=np.float64)
         n = self._n_obstaculos()
         if n:
-            # os clones nascem todos no mesmo ponto, alto, e são levados ao lugar no reset (_posicionar_obstaculos)
+            # os clones nascem todos no mesmo ponto, alto, e são levados ao lugar no reset (_posicionar_obstaculos). Só o
+            # DynamicsSensor que a dinâmica do BiguaSim exige, no centro de massa (o IMUSocket fica no nariz, a ~0,86 m do
+            # centro): cada sensor a mais pesa no passo (48 torpedos com dois sensores: 5,4 passos/s no lab)
             dinamica = {'sensor_type': 'DynamicsSensor', 'socket': 'IMUSocket',
                         'configuration': {'UseCOM': True, 'UseRPY': False}, 'location': [0, 0, 0], 'rotation': [0, 0, 0]}
-            rpy = dict(dinamica, sensor_name='RPYDynamicsSensor', configuration={'UseCOM': False, 'UseRPY': True})
             spawn = self._cena['spawn']
             env_params['agents'].append({
                 'agent_name': self.NOME_OBSTACULO, 'agent_type': self._agente_obst['tipo'],
                 'control_abstraction': 'accel', 'dynamics': {'batch_size': n, 'water_level': agua},
                 'location': [float(spawn[0]), float(spawn[1]), agua + self.ALTURA_ESPERA],
-                'rotation': [0.0, 90.0, 0.0], 'sensors': [dinamica, rpy]})
+                'rotation': [0.0, 90.0, 0.0], 'sensors': [dinamica]})
         return env_params, obs_params
+
+    @classmethod
+    def _subir_limite_arquivos(cls) -> None:
+        """Sobe o limite flexível de arquivos abertos do processo até LIMITE_ARQUIVOS (sem passar do rígido)."""
+        mole, duro = resource.getrlimit(resource.RLIMIT_NOFILE)
+        alvo = cls.LIMITE_ARQUIVOS if duro == resource.RLIM_INFINITY else min(cls.LIMITE_ARQUIVOS, duro)
+        if mole != resource.RLIM_INFINITY and mole < alvo:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (alvo, duro))
 
     def _n_obstaculos(self) -> int:
         return len(self._geo['centro'])
@@ -372,10 +387,12 @@ class GotoEnv(HoverEnv):
         return {'robot': action_arg, self.NOME_OBSTACULO: [[0.0] * 6 for _ in range(n)]}
 
     def _unwrap_state(self, state: dict) -> dict:
-        """Estado do robô; com os obstáculos, o estado vem por agente ({'robot': ..., 'obstaculo': ...})."""
+        """Estado do robô; com os obstáculos, o estado vem por agente ({'robot': ..., 'obstaculo': ...}) e cada sensor do
+        robô numa lista de um elemento (``_get_full_state`` do BiguaSim): tira da lista, como no estado de um agente só
+        (a DepthCamera vinha como [dict] e o -v1 quebrava no lab, 2026-11-18)."""
         if isinstance(state, dict) and self.NOME_OBSTACULO in state:
             self._estado_obst = state[self.NOME_OBSTACULO]
-            state = state['robot']
+            state = {k: (v[0] if isinstance(v, list) and len(v) == 1 else v) for k, v in state['robot'].items()}
         return HoverEnv._unwrap_state(state)
 
     def _segurar_obstaculos(self) -> None:
@@ -403,13 +420,26 @@ class GotoEnv(HoverEnv):
         zs = np.round(self._geo['centro'][:, 2], 3)
         return np.searchsorted(np.unique(zs), zs)
 
+    def _posicoes_obstaculos(self):
+        """Posição medida (centro de massa, DynamicsSensor[6:9]) de cada torpedo, ou None sem estado."""
+        din = self._estado_obst.get('DynamicsSensor') if isinstance(self._estado_obst, dict) else None
+        if din is None:
+            return None
+        return np.asarray(din, dtype=np.float64).reshape(self._n_obstaculos(), -1)[:, 6:9]
+
+    def _dinamica_parada(self) -> None:
+        """Troca a dinâmica do lote de obstáculos por uma que devolve aceleração zero (sem a conta do modelo a cada tick)."""
+        modelo = getattr(self._env, '_dynamics_dict', {}).get(self.NOME_OBSTACULO)
+        if modelo is not None:
+            n = self._n_obstaculos()
+            modelo.step = lambda estados, cmds, *a, **k: [[0.0] * 6 for _ in range(n)]
+
     def _fora_do_lugar(self) -> NDArray:
         """Índices dos torpedos fora do lugar: a diferença medida − imposto difere da mediana (o deslocamento constante
         entre a origem do ator e o ponto imposto) em mais de TOL_POSICAO."""
-        rpy = self._estado_obst.get('RPYDynamicsSensor') if isinstance(self._estado_obst, dict) else None
-        if rpy is None:
+        medido = self._posicoes_obstaculos()
+        if medido is None:
             return np.zeros(0, dtype=int)
-        medido = np.asarray(rpy, dtype=np.float64).reshape(self._n_obstaculos(), -1)[:, 6:9]
         dif = medido - self._geo['imposto']
         erro = np.zeros(len(dif))
         # o deslocamento vai ao longo do eixo do torpedo: comum só entre os de mesma orientação
@@ -511,6 +541,8 @@ class GotoEnv(HoverEnv):
         state = self._unwrap_state(self._env.reset())
         if self._integrar_dinamica:
             self._instalar_integrador()
+        if self._n_obstaculos():
+            self._dinamica_parada()
         raw = self._posicionar_obstaculos()
         if raw is not None:
             state = self._unwrap_state(raw)
