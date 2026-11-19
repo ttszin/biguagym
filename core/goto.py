@@ -622,7 +622,13 @@ class GotoPixelEnv(_PixelObsMixin, GotoEnv):
     _pixel_channels = ['rgb', 'depth']
 
     def __init__(self, seed: int, frame_stack: int = 3, frame_size: tuple = (100, 100),
-                 render_channel: str | None = None, **kwargs) -> None:
+                 render_channel: str | None = None, pixel_channels: list | None = None,
+                 include_state: bool = True, **kwargs) -> None:
+        # o run.py manda pixel_channels/include_state ao CUPRL; aqui os canais são fixos (RGB + profundidade + pose)
+        if pixel_channels is not None and list(pixel_channels) != self._pixel_channels:
+            raise ValueError(f"GotoPixelEnv só entrega {self._pixel_channels}, não {list(pixel_channels)}")
+        if not include_state:
+            raise ValueError("GotoPixelEnv sempre inclui a pose ('state'); include_state=False não é suportado")
         self._render_channel = render_channel
         super().__init__(seed, **kwargs)
         self._setup_pixel(frame_stack, frame_size, True, render_channel)
