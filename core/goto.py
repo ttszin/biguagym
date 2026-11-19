@@ -168,6 +168,9 @@ class GotoEnv(HoverEnv):
     # nível por tick (o teleporte do motor varre o caminho e para no primeiro obstáculo)
     NOME_OBSTACULO = 'obstaculo'
     ALTURA_ESPERA = 30.0                 # m acima da água
+    # os clones nascem sobrepostos e o motor os separa com violência: no lab, com 48 torpedos nascendo 28 m acima do spawn,
+    # o Hydrone foi empurrado 2,5 m (para fora da área) em todo reset. Nascem longe, ao lado e bem acima
+    NASCIMENTO_DESLOC = (30.0, 0.0, 50.0)   # m em relação ao spawn (z: acima da água)
     PASSO_ESPERA = 2.5                   # m entre os níveis à espera (torpedo de 2,1 m em pé)
     TOL_POSICAO = 0.3                    # m: diferença para o ponto imposto além da comum aos outros torpedos
     TENTATIVAS_POSICAO = 3
@@ -261,7 +264,8 @@ class GotoEnv(HoverEnv):
             env_params['agents'].append({
                 'agent_name': self.NOME_OBSTACULO, 'agent_type': self._agente_obst['tipo'],
                 'control_abstraction': 'accel', 'dynamics': {'batch_size': n, 'water_level': agua},
-                'location': [float(spawn[0]), float(spawn[1]), agua + self.ALTURA_ESPERA],
+                'location': [float(spawn[0]) + self.NASCIMENTO_DESLOC[0], float(spawn[1]) + self.NASCIMENTO_DESLOC[1],
+                             agua + self.NASCIMENTO_DESLOC[2]],
                 'rotation': [0.0, 90.0, 0.0], 'sensors': [dinamica]})
         return env_params, obs_params
 
@@ -484,7 +488,17 @@ class GotoEnv(HoverEnv):
             warnings.warn(f"{len(todos)} torpedo(s) dos obstáculos fora do lugar depois de {self.TENTATIVAS_POSICAO} "
                           f"tentativas: {todos.tolist()}")
         self._obst_ponto = self._geo['imposto'].copy()
-        return raw
+        return self._robo_no_spawn()
+
+    def _robo_no_spawn(self) -> dict:
+        """Põe o Hydrone de volta no spawn, parado (teleport e depois set_physics_state), segurando os obstáculos: o que
+        acontece durante o posicionamento não pode mudar o início do episódio."""
+        robo = self._env.agents['robot-id0']
+        zero = [0.0, 0.0, 0.0]
+        robo.teleport(self._location, self._rotation)
+        self._tick_obstaculos()
+        robo.set_physics_state(self._location, self._rotation, zero, zero)
+        return self._tick_obstaculos()
 
     def _passo_sim(self, action_arg) -> dict:
         """Avança ``action_repeat`` ticks; com a integração ligada ou com obstáculos, um tick por vez (impondo v e ω ao
